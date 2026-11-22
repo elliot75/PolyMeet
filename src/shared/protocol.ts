@@ -21,6 +21,8 @@ export type SttServerEvent =
       segmentId: string;
       text: string;
       track: AudioTrackRole;
+      failed?: true;
+      audioEndMs?: number;
     }
   | { type: 'transcript.committed'; segmentId: string }
   | {

@@ -1,6 +1,12 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
-import type { MinutesRecord, TranscriptSegment } from '../../shared/types';
+import {
+  MAX_SPEAKER_LABEL_LENGTH,
+  type MinutesRecord,
+  type TranscriptSegment,
+} from '../../shared/types';
 import { buildMeetingArchive, readMeetingArchive } from '../services/meetingArchive';
+
+export { MAX_SPEAKER_LABEL_LENGTH };
 
 export interface Meeting {
   id: string;
@@ -114,6 +120,7 @@ export async function searchMeetingContent(
     matches.set(meetingId, sources);
   }
   for (const segment of segments) {
+    match(segment.meetingId, 'transcript', segment.speakerLabel);
     match(segment.meetingId, 'transcript', segment.text);
     match(segment.meetingId, 'translation', segment.translation);
   }
@@ -280,7 +287,51 @@ export async function saveInterimSegment(segment: TranscriptSegment): Promise<vo
   const shouldSave = recording?.meetingId === segment.meetingId && !previous?.isFinal;
   if (shouldSave) await store.put({ ...segment, isFinal: false });
   await tx.done;
-  if (shouldSave) notifyMeetingContentChanged();
+}
+
+export async function deleteInterimSegment(id: string): Promise<boolean> {
+  const tx = (await db()).transaction('segments', 'readwrite');
+  const segment = await tx.store.get(id);
+  const removed = segment && !segment.isFinal;
+  if (removed) await tx.store.delete(id);
+  await tx.done;
+  if (removed) notifyMeetingContentChanged();
+  return Boolean(removed);
+}
+
+export async function finalizeSegment(id: string): Promise<TranscriptSegment | undefined> {
+  const tx = (await db()).transaction('segments', 'readwrite');
+  const segment = await tx.store.get(id);
+  let finalized: TranscriptSegment | undefined;
+  if (segment && !segment.isFinal && segment.text.trim()) {
+    finalized = { ...segment, isFinal: true };
+    await tx.store.put(finalized);
+  }
+  await tx.done;
+  if (finalized) notifyMeetingContentChanged();
+  return finalized;
+}
+
+export async function deleteSegment(id: string): Promise<void> {
+  const tx = (await db()).transaction('segments', 'readwrite');
+  const segment = await tx.store.get(id);
+  if (segment) await tx.store.delete(id);
+  await tx.done;
+  if (segment) notifyMeetingContentChanged();
+}
+
+export async function getPlayableRecordingIds(recordingIds: string[]): Promise<Set<string>> {
+  const playable = new Set<string>();
+  if (!recordingIds.length) return playable;
+  const tx = (await db()).transaction('audioChunks');
+  const index = tx.store.index('by-recording');
+  await Promise.all([
+    tx.done,
+    ...recordingIds.map(async (id) => {
+      if ((await index.getKey(id)) !== undefined) playable.add(id);
+    }),
+  ]);
+  return playable;
 }
 
 export async function listSegments(meetingId: string): Promise<TranscriptSegment[]> {
@@ -429,8 +480,6 @@ export async function importMeetingArchive(file: Blob): Promise<Meeting[]> {
   return meetings.sort((a, b) => b.createdAt - a.createdAt);
 }
 
-export const MAX_SPEAKER_LABEL_LENGTH = 100;
-
 export async function renameSegmentSpeaker(
   segment: Pick<TranscriptSegment, 'id' | 'meetingId' | 'speakerLabel'>,
   name: string,
@@ -456,6 +505,7 @@ export async function renameSegmentSpeaker(
             item.speakerLabel === current.speakerLabel,
         );
   await Promise.all([tx.done, ...matches.map((item) => tx.store.put({ ...item, speakerLabel }))]);
+  notifyMeetingContentChanged();
   return matches.map((item) => item.id);
 }
 

@@ -1,12 +1,16 @@
 import type { SttClientMessage, SttServerEvent, SttStart } from '../../shared/protocol';
+import { usesManualCommit } from '../../shared/models';
 
 const MAX_BUFFERED_PACKETS = 3000;
 const READY_TIMEOUT_MS = 15000;
 const PRE_ROLL_MS = 500;
+const PENDING_SPEECH_TTL_MS = 20_000;
+// The worklet emits one audio packet per 100 ms during continuous capture.
+export const LIVE_AUDIO_REPLAY_MS = MAX_BUFFERED_PACKETS * 100;
 
 type AudioMessage = Extract<SttClientMessage, { type: 'audio.chunk' }>;
 type Outgoing =
-  | { wire: AudioMessage; quiet: boolean; bytes: number; speechStart: boolean }
+  | { wire: AudioMessage; quiet: boolean; bytes: number; speechStart: boolean; endByte?: number }
   | { wire: Extract<SttClientMessage, { type: 'audio.commit' | 'audio.end' }> };
 export class LiveSttClient {
   private socket?: WebSocket;
@@ -20,16 +24,62 @@ export class LiveSttClient {
   private queue: Outgoing[] = [];
   private sent: Outgoing[] = [];
   private committed: { messages: Outgoing[]; id?: string }[] = [];
+  private sentBytes = 0;
   private connectionId = '';
   private awaitingFinal = new Set<string>();
-  private pendingSpeech = 0;
+  private pendingSpeechAt: number[] = [];
   constructor(
     private start: SttStart,
     private onEvent: (event: SttServerEvent) => void,
   ) {}
+  private get sendsCommit(): boolean {
+    return (
+      usesManualCommit(this.start.provider, this.start.model.trim()) ||
+      this.start.provider === 'gemini'
+    );
+  }
+  private hasPendingSpeech(): boolean {
+    const cutoff = Date.now() - PENDING_SPEECH_TTL_MS;
+    this.pendingSpeechAt = this.pendingSpeechAt.filter((timestamp) => timestamp >= cutoff);
+    return this.pendingSpeechAt.length > 0;
+  }
+  private pruneCommittedOverflow() {
+    while (this.committed.length > 16) {
+      this.committed.shift();
+      this.reportBufferLoss();
+    }
+  }
+
+  private acknowledgeGeminiAudio(endMs: number | undefined): number {
+    let acknowledged: Outgoing[] = [];
+    if (endMs !== undefined) {
+      const endByte = Math.min(this.sentBytes, (endMs * this.start.sampleRate * 2) / 1000);
+      const throughEnd = (packets: Outgoing[]) => {
+        const firstPending = packets.findIndex(
+          (packet) => 'quiet' in packet && (packet.endByte ?? Infinity) > endByte,
+        );
+        const removed = packets.splice(0, firstPending < 0 ? packets.length : firstPending);
+        acknowledged.push(...removed);
+        return packets.length > 0;
+      };
+      this.committed = this.committed.filter((batch) => throughEnd(batch.messages));
+      throughEnd(this.sent);
+    } else if (this.committed.length) {
+      // Older servers omit offsets. The closed batches can include noise that produced no final.
+      acknowledged = this.committed.splice(0).flatMap((batch) => batch.messages);
+    } else {
+      return 0;
+    }
+    if (acknowledged.length) this.savePreRoll(acknowledged);
+    return Math.max(
+      1,
+      acknowledged.filter((packet) => 'speechStart' in packet && packet.speechStart).length,
+    );
+  }
   connect() {
     if (this.stopped) return;
     this.ready = false;
+    this.sentBytes = 0;
     this.connectionId = crypto.randomUUID();
     const socket = new WebSocket(
       `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/stt`,
@@ -58,12 +108,24 @@ export class LiveSttClient {
         this.retry = 0;
         // Only quiet, already acknowledged context is replayed ahead of pending audio.
         // Never resend finalized words just to provide pre-roll.
-        for (const packet of this.preRoll) socket.send(JSON.stringify(packet));
+        for (const packet of this.preRoll) {
+          socket.send(JSON.stringify(packet));
+          this.sentBytes += atob(packet.pcm16Base64).length;
+        }
         this.pump();
       }
       if (event.type === 'transcript.committed') {
-        const batch = this.committed.find((item) => !item.id);
-        if (batch) batch.id = event.segmentId;
+        if (!this.sendsCommit) {
+          this.committed.push({
+            id: event.segmentId,
+            messages: this.sent,
+          });
+          this.sent = [];
+          this.pruneCommittedOverflow();
+        } else {
+          const batch = this.committed.find((item) => !item.id);
+          if (batch) batch.id = event.segmentId;
+        }
         this.awaitingFinal.add(`${this.connectionId}:${event.segmentId}`);
         return;
       }
@@ -78,21 +140,26 @@ export class LiveSttClient {
         if (event.type === 'transcript.interim') this.awaitingFinal.add(event.segmentId);
         else {
           this.awaitingFinal.delete(event.segmentId);
-          const matching = this.committed.findIndex((batch) => batch.id === providerId);
-          if (matching >= 0) this.savePreRoll(this.committed.splice(matching, 1)[0].messages);
-          else if (this.committed[0] && !this.committed[0].id)
-            this.savePreRoll(this.committed.shift()!.messages);
-          else if (!this.committed.length) {
-            // A provider can finalize before our worklet's next commit. Keep the
-            // next locally detected utterance if it has already started.
-            let speechStarts = 0;
-            const nextSpeech = this.sent.findIndex(
-              (packet) => 'speechStart' in packet && packet.speechStart && ++speechStarts === 2,
-            );
-            this.savePreRoll(nextSpeech < 0 ? this.sent : this.sent.slice(0, nextSpeech));
-            this.sent = nextSpeech < 0 ? [] : this.sent.slice(nextSpeech);
+          const geminiAcknowledged =
+            this.start.provider === 'gemini' ? this.acknowledgeGeminiAudio(event.audioEndMs) : 0;
+          if (!geminiAcknowledged) {
+            const matching = this.committed.findIndex((batch) => batch.id === providerId);
+            if (matching >= 0) this.savePreRoll(this.committed.splice(matching, 1)[0].messages);
+            else if (this.sendsCommit && this.committed[0] && !this.committed[0].id)
+              this.savePreRoll(this.committed.shift()!.messages);
+            else if (!this.committed.length) {
+              // A provider can finalize before our worklet's next commit. Keep the
+              // next locally detected utterance if it has already started.
+              let speechStarts = 0;
+              const nextSpeech = this.sent.findIndex(
+                (packet) => 'speechStart' in packet && packet.speechStart && ++speechStarts === 2,
+              );
+              this.savePreRoll(nextSpeech < 0 ? this.sent : this.sent.slice(0, nextSpeech));
+              this.sent = nextSpeech < 0 ? [] : this.sent.slice(nextSpeech);
+            }
           }
-          this.pendingSpeech = Math.max(0, this.pendingSpeech - 1);
+          this.hasPendingSpeech();
+          this.pendingSpeechAt.splice(0, geminiAcknowledged || 1);
         }
       }
       if (event.type === 'error' && !event.recoverable) {
@@ -113,7 +180,17 @@ export class LiveSttClient {
         const replay = this.committed.flatMap((batch) => batch.messages);
         const pending = [...replay, ...this.sent, ...this.queue];
         this.queue = pending.slice(-MAX_BUFFERED_PACKETS);
-        if (pending.length > MAX_BUFFERED_PACKETS) this.reportBufferLoss();
+        if (pending.length > MAX_BUFFERED_PACKETS) {
+          this.reportBufferLoss();
+          const retainedSpeech = this.queue.filter(
+            (item) => 'speechStart' in item && item.speechStart,
+          ).length;
+          if (retainedSpeech === 0) {
+            this.pendingSpeechAt = [];
+          } else if (this.pendingSpeechAt.length > retainedSpeech) {
+            this.pendingSpeechAt = this.pendingSpeechAt.slice(-retainedSpeech);
+          }
+        }
         this.committed = [];
         this.sent = [];
         const discardedInterims = [...this.awaitingFinal];
@@ -139,18 +216,25 @@ export class LiveSttClient {
     while (this.queue.length && count++ < 5 && this.socket.bufferedAmount < 256 * 1024) {
       const message = this.queue.shift()!;
       this.socket.send(JSON.stringify(message.wire));
+      if ('quiet' in message) message.endByte = this.sentBytes += message.bytes;
       this.sent.push(message);
       if (message.wire.type === 'audio.commit') {
-        this.committed.push({ messages: this.sent });
+        if (this.sent.some((item) => 'quiet' in item && !item.quiet)) {
+          this.committed.push({ messages: this.sent });
+        }
         this.sent = [];
+        this.pruneCommittedOverflow();
       }
-      if (this.committed.length > 16) {
-        this.committed.shift();
-        this.reportBufferLoss();
+      if (!this.sendsCommit && this.sent.every((item) => !('quiet' in item) || item.quiet)) {
+        const quiet = this.sent.filter((item) => 'quiet' in item);
+        let bytes = quiet.reduce((sum, item) => sum + item.bytes, 0);
+        const limit = (this.start.sampleRate * 2 * PRE_ROLL_MS) / 1000;
+        while (quiet.length > 1 && bytes > limit) bytes -= quiet.shift()!.bytes;
+        this.sent = quiet;
       }
       if (this.sent.length > MAX_BUFFERED_PACKETS) {
-        this.sent.shift();
-        this.reportBufferLoss();
+        const dropped = this.sent.shift();
+        if (dropped && 'quiet' in dropped && !dropped.quiet) this.reportBufferLoss();
       }
     }
     if (this.queue.length) this.pumpTimer = window.setTimeout(() => this.pump(), 20);
@@ -206,10 +290,13 @@ export class LiveSttClient {
     });
   }
   noteSpeechStart() {
-    if (!this.stopped) this.pendingSpeech++;
+    if (!this.stopped) {
+      this.pendingSpeechAt.push(Date.now());
+      if (this.pendingSpeechAt.length > 50) this.pendingSpeechAt.shift();
+    }
   }
   commit() {
-    if (!this.stopped) this.enqueue({ wire: { type: 'audio.commit' } });
+    if (!this.stopped && this.sendsCommit) this.enqueue({ wire: { type: 'audio.commit' } });
   }
   endInput() {
     if (this.stopped || this.start.provider !== 'openai') return;
@@ -229,12 +316,12 @@ export class LiveSttClient {
     await new Promise((resolve) => setTimeout(resolve, 2000));
     const deadline = Date.now() + timeoutMs;
     while (
-      (this.awaitingFinal.size > 0 || this.pendingSpeech > 0) &&
+      (this.awaitingFinal.size > 0 || this.hasPendingSpeech()) &&
       !this.stopped &&
       Date.now() < deadline
     )
       await new Promise((resolve) => setTimeout(resolve, 100));
-    return this.awaitingFinal.size === 0 && this.pendingSpeech === 0;
+    return this.awaitingFinal.size === 0 && !this.hasPendingSpeech();
   }
   stop() {
     this.stopped = true;
@@ -245,6 +332,7 @@ export class LiveSttClient {
     this.queue = [];
     this.committed = [];
     this.sent = [];
+    this.pendingSpeechAt = [];
     if (this.socket?.readyState === WebSocket.OPEN)
       this.socket.send(JSON.stringify({ type: 'session.stop' }));
     this.socket?.close();

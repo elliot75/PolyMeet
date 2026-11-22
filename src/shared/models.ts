@@ -4,6 +4,15 @@ export interface ModelOption {
   id: string;
   capabilities: readonly ModelCapability[];
 }
+const MANUAL_COMMIT_OPENAI_MODELS = new Set([
+  'gpt-live-transcribe',
+  'gpt-transcribe',
+  'gpt-realtime-whisper',
+]);
+
+export function usesManualCommit(provider: ProviderId, model: string): boolean {
+  return provider === 'openai' && MANUAL_COMMIT_OPENAI_MODELS.has(model);
+}
 export const defaultModels = {
   openai: {
     live: 'gpt-live-transcribe',

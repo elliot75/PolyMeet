@@ -1,13 +1,18 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  deleteInterimSegment,
+  deleteSegment,
   exportMeetingArchive,
+  finalizeSegment,
+  getPlayableRecordingIds,
   getRecordingBlob,
   importMeetingArchive,
   listMeetings,
   listMinutes,
   listRecordings,
   listSegments,
+  MAX_SPEAKER_LABEL_LENGTH,
   migrateMeetings,
   renameSegmentSpeaker,
   saveAudioChunk,
@@ -18,6 +23,7 @@ import {
   saveSegment,
   saveSegments,
   searchMeetingContent,
+  subscribeToMeetingContent,
   updateSegmentTranslation,
 } from '../src/client/db/meetingDb';
 import { buildMeetingArchive, readMeetingArchive } from '../src/client/services/meetingArchive';
@@ -104,13 +110,46 @@ describe('meeting database', () => {
       text: 'partial',
       isFinal: false,
     };
-    await saveInterimSegment(draft);
-    await saveInterimSegment({ ...draft, text: 'latest partial' });
-    expect(await listSegments(meetingId)).toEqual([{ ...draft, text: 'latest partial' }]);
-    const final = { ...draft, text: 'finished sentence', isFinal: true };
+    const changed = vi.fn();
+    const unsub = subscribeToMeetingContent(changed);
+    try {
+      await saveInterimSegment(draft);
+      await saveInterimSegment({ ...draft, text: 'latest partial' });
+      expect(changed).not.toHaveBeenCalled();
+      expect(await listSegments(meetingId)).toEqual([{ ...draft, text: 'latest partial' }]);
+
+      const finalized = await finalizeSegment(draft.id);
+      expect(finalized).toEqual({ ...draft, text: 'latest partial', isFinal: true });
+      expect(changed).toHaveBeenCalledTimes(1);
+
+      // deleteInterimSegment never removes a finalized segment
+      await deleteInterimSegment(draft.id);
+      expect(await listSegments(meetingId)).toEqual([
+        { ...draft, text: 'latest partial', isFinal: true },
+      ]);
+
+      const disposableDraft = { ...draft, id: 'disposable-draft', text: 'ghost' };
+      await saveInterimSegment(disposableDraft);
+      await deleteInterimSegment(disposableDraft.id);
+      expect(await listSegments(meetingId)).toEqual([
+        { ...draft, text: 'latest partial', isFinal: true },
+      ]);
+
+      await saveInterimSegment({ ...draft, id: 'removable-draft', text: 'temp' });
+      expect((await searchMeetingContent('temp')).has(meetingId)).toBe(true);
+      const notificationsBeforeDelete = changed.mock.calls.length;
+      await deleteSegment('removable-draft');
+      expect(changed).toHaveBeenCalledTimes(notificationsBeforeDelete + 1);
+      expect((await searchMeetingContent('temp')).has(meetingId)).toBe(false);
+      expect(await listSegments(meetingId)).toHaveLength(1);
+    } finally {
+      unsub();
+    }
+
+    const final = { ...draft, id: 'recover-final-2', text: 'finished sentence', isFinal: true };
     await saveSegment(final);
-    await saveInterimSegment({ ...draft, text: 'stale partial' });
-    expect(await listSegments(meetingId)).toEqual([final]);
+    await saveInterimSegment({ ...final, text: 'stale partial' });
+    expect((await listSegments(meetingId)).find((s) => s.id === final.id)).toEqual(final);
   });
 
   it('renames one segment or matching labels in its recording without touching other fields', async () => {
@@ -302,6 +341,17 @@ describe('cross-meeting search', () => {
     expect((await searchMeetingContent('revised')).get(backupMeeting.id)).toEqual(
       new Set(['translation']),
     );
+    const renamedNotify = vi.fn();
+    const unsubRename = subscribeToMeetingContent(renamedNotify);
+    try {
+      await renameSegmentSpeaker(backupSegment, '王總監', 'segment');
+      expect(renamedNotify).toHaveBeenCalledTimes(1);
+      expect((await searchMeetingContent('王總監')).get(backupMeeting.id)).toEqual(
+        new Set(['transcript']),
+      );
+    } finally {
+      unsubRename();
+    }
     expect(await searchMeetingContent('  ')).toEqual(new Map());
   });
 });
@@ -353,17 +403,71 @@ describe('meeting archives', () => {
     const before = await listMeetings();
     const file = await exportMeetingArchive({ meetingId: backupMeeting.id, includeAudio: true });
     const data = await readMeetingArchive(file);
+    const oversizedHeader = new Uint8Array(13);
+    oversizedHeader.set(new TextEncoder().encode('PolyMeet\n'));
+    new DataView(oversizedHeader.buffer).setUint32(9, 33 * 1024 * 1024);
     const invalidFiles = [
       new Blob(['not a backup']),
+      oversizedHeader.buffer ? new Blob([oversizedHeader]) : new Blob([]),
       file.slice(0, file.size - 1),
       buildMeetingArchive({ ...data, meetings: [...data.meetings, backupMeeting] }),
+      buildMeetingArchive({
+        ...data,
+        meetings: [{ ...backupMeeting, mode: '無效模式' }],
+      }),
       buildMeetingArchive({ ...data, segments: [{ ...backupSegment, recordingId: 'missing' }] }),
+      buildMeetingArchive({
+        ...data,
+        segments: [{ ...backupSegment, startedAtMs: 500, endedAtMs: 100 }],
+      }),
+      buildMeetingArchive({
+        ...data,
+        segments: [{ ...backupSegment, speakerLabel: 'a'.repeat(MAX_SPEAKER_LABEL_LENGTH + 1) }],
+      }),
       buildMeetingArchive({ ...data, minutes: [{ ...backupMinutes, createdAt: NaN }] }),
       buildMeetingArchive({ ...data, audioChunks: [data.audioChunks[0], data.audioChunks[0]] }),
     ];
     for (const invalid of invalidFiles)
       await expect(importMeetingArchive(invalid)).rejects.toThrow();
     expect(await listMeetings()).toEqual(before);
+
+    // Unknown extra properties are stripped from imported records.
+    const dirtyFile = buildMeetingArchive({
+      ...data,
+      meetings: [{ ...backupMeeting, unexpected: 'ignored' } as typeof backupMeeting],
+    });
+    const cleanSnapshot = await readMeetingArchive(dirtyFile);
+    expect(cleanSnapshot.meetings[0]).toEqual(backupMeeting);
+    expect('unexpected' in cleanSnapshot.meetings[0]).toBe(false);
+  });
+
+  it('tracks which recordings have stored audio chunks without loading blobs', async () => {
+    await saveMeeting({
+      id: 'playable-meeting',
+      title: 'Playable Check',
+      createdAt: 25,
+      notes: '',
+      mode: '一般會議',
+    });
+    const withAudio = {
+      id: 'playable-recording',
+      meetingId: 'playable-meeting',
+      createdAt: 26,
+      mimeType: 'audio/webm',
+      completed: true,
+    };
+    const emptyRecording = {
+      id: 'empty-recording',
+      meetingId: 'playable-meeting',
+      createdAt: 27,
+      mimeType: 'audio/webm',
+      completed: true,
+    };
+    await saveRecording(withAudio);
+    await saveAudioChunk(withAudio.id, 0, new Blob(['chunk']));
+    await saveRecording(emptyRecording);
+    const playable = await getPlayableRecordingIds([withAudio.id, emptyRecording.id]);
+    expect(playable).toEqual(new Set([withAudio.id]));
   });
 
   it('rolls back the whole import if a generated ID already exists', async () => {

@@ -1,5 +1,7 @@
 import type { AudioTrackRole } from '../../shared/types';
 
+import { LIVE_AUDIO_REPLAY_MS } from './liveSttClient';
+
 interface Anchor {
   startedAtMs: number;
   id?: string;
@@ -20,7 +22,18 @@ export class SegmentTimeline {
   identify(id: string, track: AudioTrackRole, fallback: number): SegmentAnchor {
     const existing = this.positions.get(id);
     if (existing) return existing;
-    const anchor = track === 'mic' || track === 'system' ? this.starts[track].shift() : undefined;
+    let anchor: Anchor | undefined;
+    if (track === 'mic' || track === 'system') {
+      const queue = this.starts[track];
+      while (
+        queue.length &&
+        !queue[0].id &&
+        fallback - queue[0].startedAtMs > LIVE_AUDIO_REPLAY_MS
+      ) {
+        queue.shift();
+      }
+      anchor = queue.shift();
+    }
     const identified = { startedAtMs: anchor?.startedAtMs ?? fallback, id: anchor?.id ?? id };
     this.positions.set(id, identified);
     return identified;

@@ -1,6 +1,7 @@
 import WebSocket, { WebSocketServer } from 'ws';
 import type { Server } from 'node:http';
 import type { SttStart, SttServerEvent } from '../../shared/protocol';
+import { usesManualCommit } from '../../shared/models';
 import { createEventMapper, geminiConfiguration, openAiConfiguration } from './adapters';
 import { isAllowedOrigin } from '../origin';
 
@@ -114,9 +115,7 @@ export function attachSttProxy(
           fail('missing_api_key', '請設定即時轉錄的 API 金鑰。');
           return;
         }
-        manualCommit =
-          start.provider === 'openai' &&
-          ['gpt-live-transcribe', 'gpt-transcribe', 'gpt-realtime-whisper'].includes(start.model);
+        manualCommit = usesManualCommit(start.provider, start.model);
         try {
           upstream = connect(start, key);
         } catch {

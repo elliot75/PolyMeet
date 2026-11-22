@@ -63,9 +63,12 @@ describe('transcription adapters', () => {
       model: 'gemini-3.5-transcribe-live',
       sampleRate: 16000,
     });
-    expect(map({ serverContent: { inputTranscription: { text: '測試' } } })[0]).toMatchObject({
+    expect(
+      map({ serverContent: { inputTranscription: { text: '測試', endOffset: '2.5s' } } })[0],
+    ).toMatchObject({
       type: 'transcript.final',
       text: '測試',
+      audioEndMs: 2500,
     });
     expect(map({ goAway: { timeLeft: '30s' } })[0]).toMatchObject({ type: 'session.reconnecting' });
   });
@@ -107,7 +110,7 @@ describe('transcription adapters', () => {
         error: { message: 'private provider error' },
       }),
     ).toEqual([
-      { type: 'transcript.final', segmentId: 'failed-item', text: '', track: 'mic' },
+      { type: 'transcript.final', segmentId: 'failed-item', text: '', track: 'mic', failed: true },
       {
         type: 'error',
         code: 'transcript_failed',

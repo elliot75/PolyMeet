@@ -1,5 +1,6 @@
 import {
   memo,
+  useCallback,
   useEffect,
   useId,
   useRef,
@@ -8,13 +9,16 @@ import {
   type HTMLAttributes,
 } from 'react';
 import type { AudioTrackRole, TranscriptSegment } from '../../shared/types';
+import { normalizeAudioMime } from '../audio/audioMime';
 import {
+  deleteInterimSegment,
+  finalizeSegment,
   listSegments,
   MAX_SPEAKER_LABEL_LENGTH,
+  normalizeMeetingQuery,
   renameSegmentSpeaker,
   saveRecordingSegments,
   saveUploadedRecording,
-  updateSegmentText,
   type Recording,
 } from '../db/meetingDb';
 import { downloadTranscript, formatTimestamp } from '../services/exporter';
@@ -24,6 +28,7 @@ import {
   transcribeSavedRecording,
 } from '../services/fileTranscription';
 import type { Settings } from '../services/settings';
+import type { EditSaveQueue } from '../services/editSaveQueue';
 import { needsTranslation } from '../services/translationQueue';
 import { closeDialogAnimated, isPointerOutsideDialog, openDialogModal } from '../utils/dialog';
 import {
@@ -44,6 +49,7 @@ interface Props {
   languageHints: string[];
   segments: TranscriptSegment[];
   recordings: Recording[];
+  playableRecordingIds: ReadonlySet<string> | null | undefined;
   interims: Record<string, { track: AudioTrackRole; text: string }>;
   recordingToTranscribe: Recording | null;
   translating: ReadonlyMap<string, Promise<void>>;
@@ -55,29 +61,21 @@ interface Props {
   onCloseRecordingTranscription: () => void;
   onTranslate: (segments: TranscriptSegment[]) => void;
   onTextChange: (id: string, text: string) => void;
+  onFinalizeSegment: (segment: TranscriptSegment) => void;
+  onDeleteSegment: (id: string) => void;
   onSpeakerChange: (meetingId: string, ids: string[], name: string) => void;
   onRecordingSaved: () => void;
   onBusyChange: (busy: boolean) => void;
   onSeek: (recordingId: string, seconds: number) => void;
+  editSaves: EditSaveQueue<{ id: string; meetingId: string; text: string }>;
   settings: Settings;
   locked?: boolean;
 }
 
-const audioTypes: Record<string, string> = {
-  wav: 'audio/wav',
-  mp3: 'audio/mpeg',
-  m4a: 'audio/mp4',
-  mp4: 'audio/mp4',
-  webm: 'audio/webm',
-  ogg: 'audio/ogg',
-  flac: 'audio/flac',
-  aac: 'audio/aac',
-};
-
 function normalizeAudio(file: File): File {
-  const mime = file.type || audioTypes[file.name.split('.').pop()?.toLowerCase() || ''];
-  if (!mime?.startsWith('audio/')) throw new Error('請選擇可支援的音訊檔案。');
-  return file.type
+  const mime = normalizeAudioMime(file.type, file.name);
+  if (!mime) throw new Error('請選擇可支援的音訊檔案。');
+  return mime === file.type
     ? file
     : new File([file], file.name, { type: mime, lastModified: file.lastModified });
 }
@@ -89,6 +87,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
   languageHints,
   segments,
   recordings,
+  playableRecordingIds,
   interims,
   recordingToTranscribe,
   translating,
@@ -96,10 +95,13 @@ export const TranscriptFeed = memo(function TranscriptFeed({
   onCloseRecordingTranscription,
   onTranslate,
   onTextChange,
+  onFinalizeSegment,
+  onDeleteSegment,
   onSpeakerChange,
   onRecordingSaved,
   onBusyChange,
   onSeek,
+  editSaves,
   settings,
   locked = false,
 }: Props) {
@@ -134,8 +136,21 @@ export const TranscriptFeed = memo(function TranscriptFeed({
   const uploadProgress = useRef<{ recording: Recording; saved: boolean; completed: number } | null>(
     null,
   );
-  const writes = useRef<Promise<void>>(Promise.resolve());
   const pressedOutside = useRef(false);
+  const renamePressedOutside = useRef(false);
+  const [draftAction, setDraftAction] = useState<string | null>(null);
+
+  const flushEdits = useCallback(
+    () => editSaves.flush((edit) => edit.meetingId === meetingId),
+    [editSaves, meetingId],
+  );
+
+  useEffect(
+    () => () => {
+      void flushEdits();
+    },
+    [flushEdits],
+  );
 
   useEffect(() => () => abort.current?.abort(), []);
 
@@ -152,8 +167,11 @@ export const TranscriptFeed = memo(function TranscriptFeed({
     setUploadError('');
     setProgress('');
     openDialogModal(dialog.current);
-    void writes.current
-      .then(() => listSegments(meetingId))
+    void flushEdits()
+      .then((saved) => {
+        if (!saved) throw new Error('transcript edits are pending');
+        return listSegments(meetingId);
+      })
       .then((items) => {
         if (active)
           setExistingSegments(
@@ -166,7 +184,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
     return () => {
       active = false;
     };
-  }, [meetingId, recordingToTranscribe]);
+  }, [meetingId, recordingToTranscribe, flushEdits]);
 
   useEffect(() => {
     if (renameTarget) {
@@ -302,32 +320,67 @@ export const TranscriptFeed = memo(function TranscriptFeed({
   function edit(segment: TranscriptSegment, text: string) {
     setEditError('');
     onTextChange(segment.id, text);
-    writes.current = writes.current.catch(() => {}).then(() => updateSegmentText(segment.id, text));
-    void writes.current.catch(() => {
-      setEditError('無法保存逐字稿修改，請檢查瀏覽器儲存空間。');
+    editSaves.schedule(segment.id, { id: segment.id, meetingId, text }, 250, (saved) => {
+      const message = '無法保存逐字稿修改，請檢查瀏覽器儲存空間。';
+      setEditError((error) => (saved ? (error === message ? '' : error) : message));
     });
   }
 
-  function translate(items: TranscriptSegment[]) {
-    const saved = writes.current;
-    void saved
-      .then(() => {
-        if (saved === writes.current) onTranslate(items);
-      })
-      .catch(() => {});
+  async function handleFinalize(segment: TranscriptSegment) {
+    if (busy || locked || draftAction) return;
+    setDraftAction(segment.id);
+    setEditError('');
+    try {
+      if (!(await editSaves.flush((edit) => edit.id === segment.id))) {
+        setEditError('無法保存此段修改，請檢查瀏覽器儲存空間後再確認定稿。');
+        return;
+      }
+      const updated = await finalizeSegment(segment.id);
+      if (updated) onFinalizeSegment(updated);
+    } catch {
+      setEditError('無法將逐字稿確認為定稿，請重試。');
+    } finally {
+      setDraftAction(null);
+    }
+  }
+
+  async function handleDelete(id: string) {
+    if (busy || locked || draftAction) return;
+    setDraftAction(id);
+    setEditError('');
+    try {
+      if (await deleteInterimSegment(id)) {
+        editSaves.discard(id);
+        onDeleteSegment(id);
+      } else {
+        setEditError('此段落已變更，請重新載入後再試。');
+      }
+    } catch {
+      setEditError('無法刪除逐字稿段落，請重試。');
+    } finally {
+      setDraftAction(null);
+    }
+  }
+
+  async function translate(items: TranscriptSegment[]) {
+    const ids = new Set(items.map(({ id }) => id));
+    if (await editSaves.flush((edit) => ids.has(edit.id))) onTranslate(items);
+    else setEditError('無法保存待翻譯的段落，請檢查瀏覽器儲存空間後重試。');
   }
 
   const untranslated = isBilingual
     ? segments.filter((segment) => needsTranslation(segment) && !translating.has(segment.id))
     : [];
 
-  const normalizedFilter = filterQuery.trim().toLowerCase();
+  const normalizedFilter = normalizeMeetingQuery(filterQuery);
   const visibleSegments = normalizedFilter
     ? segments.filter(
         (segment) =>
-          segment.text.toLowerCase().includes(normalizedFilter) ||
-          (segment.translation?.toLowerCase().includes(normalizedFilter) ?? false) ||
-          segment.speakerLabel.toLowerCase().includes(normalizedFilter),
+          normalizeMeetingQuery(segment.text).includes(normalizedFilter) ||
+          (segment.translation
+            ? normalizeMeetingQuery(segment.translation).includes(normalizedFilter)
+            : false) ||
+          normalizeMeetingQuery(segment.speakerLabel).includes(normalizedFilter),
       )
     : segments;
   const activeInterims = Object.entries(interims).filter(([, item]) => item.text.trim());
@@ -592,9 +645,27 @@ export const TranscriptFeed = memo(function TranscriptFeed({
         ref={renameDialog}
         className="speaker-dialog"
         aria-labelledby={`${renameId}-title`}
+        {...({ closedby: renaming ? 'none' : 'any' } as HTMLAttributes<HTMLDialogElement>)}
         onCancel={(event) => {
           event.preventDefault();
           if (!renaming) void closeDialogAnimated(renameDialog.current);
+        }}
+        onPointerDown={(event) => {
+          if (!renaming && !('closedBy' in HTMLDialogElement.prototype) && renameDialog.current) {
+            renamePressedOutside.current = isPointerOutsideDialog(event, renameDialog.current);
+          }
+        }}
+        onPointerUp={(event) => {
+          if (
+            !renaming &&
+            !('closedBy' in HTMLDialogElement.prototype) &&
+            renamePressedOutside.current &&
+            renameDialog.current &&
+            isPointerOutsideDialog(event, renameDialog.current)
+          ) {
+            void closeDialogAnimated(renameDialog.current);
+          }
+          renamePressedOutside.current = false;
         }}
         onClose={() => {
           setRenameTarget(null);
@@ -604,6 +675,15 @@ export const TranscriptFeed = memo(function TranscriptFeed({
       >
         <div className="dialog-header">
           <h2 id={`${renameId}-title`}>更名語者</h2>
+          <button
+            type="button"
+            className="close"
+            aria-label="關閉更名視窗"
+            disabled={renaming}
+            onClick={() => void closeDialogAnimated(renameDialog.current)}
+          >
+            <IconX size={18} />
+          </button>
         </div>
         <form
           className="speaker-form"
@@ -742,7 +822,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
                   >
                     更名
                   </button>
-                  {segment.recordingId ? (
+                  {segment.recordingId && playableRecordingIds?.has(segment.recordingId) ? (
                     <button
                       type="button"
                       className="seek"
@@ -756,7 +836,27 @@ export const TranscriptFeed = memo(function TranscriptFeed({
                     <span className="segment-time">{formatTimestamp(segment.startedAtMs)}</span>
                   )}
                   {segment.timeIsChunkStart && <span className="chunk-note">片段起點</span>}
-                  {!segment.isFinal && <span className="chunk-note">恢復的未定稿</span>}
+                  {!segment.isFinal && (
+                    <>
+                      <span className="chunk-note">恢復的未定稿</span>
+                      <button
+                        type="button"
+                        className="secondary small-button"
+                        disabled={busy || locked || !!draftAction || !segment.text.trim()}
+                        onClick={() => void handleFinalize(segment)}
+                      >
+                        確認定稿
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary small-button"
+                        disabled={busy || locked || !!draftAction}
+                        onClick={() => void handleDelete(segment.id)}
+                      >
+                        刪除
+                      </button>
+                    </>
+                  )}
                   {isBilingual && segment.isFinal && (
                     <button
                       className="secondary small-button"
@@ -773,7 +873,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
                 <textarea
                   className="segment-editor"
                   aria-label={`${segment.speakerLabel}逐字稿`}
-                  disabled={busy || locked}
+                  disabled={busy || locked || draftAction === segment.id}
                   value={segment.text}
                   onChange={(event) => edit(segment, event.target.value)}
                 />

@@ -7,11 +7,12 @@ const mocked = vi.hoisted(() => ({
   openaiTranscribe: vi.fn(),
   openaiResponse: vi.fn(),
   openaiModels: vi.fn(),
+  geminiModels: vi.fn(),
 }));
 vi.mock('@google/genai', () => ({
   GoogleGenAI: class {
     files = { upload: mocked.upload, get: mocked.get, delete: mocked.remove };
-    models = { generateContent: mocked.generate };
+    models = { generateContent: mocked.generate, list: mocked.geminiModels };
   },
   createPartFromUri: (uri: string, mimeType: string) => ({ uri, mimeType }),
   createUserContent: (content: unknown) => content,
@@ -300,5 +301,78 @@ describe('provider routes with simulated services', () => {
     });
     expect(modelsRes.status).toBe(401);
     expect(await modelsRes.json()).toEqual({ error: 'auth_failed' });
+  });
+
+  it('passes request abortSignal to Gemini model listing', async () => {
+    mocked.geminiModels.mockResolvedValue(
+      (async function* () {
+        yield { name: 'models/gemini-3.8-flash' };
+      })(),
+    );
+    const res = await app.request('/api/models?provider=gemini', {
+      headers: { 'x-gemini-api-key': 'test-key' },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ models: ['gemini-3.8-flash'] });
+    expect(mocked.geminiModels).toHaveBeenCalledWith({
+      config: expect.objectContaining({ pageSize: 100, abortSignal: expect.any(AbortSignal) }),
+    });
+  });
+
+  it('streams multi-paragraph Chinese minutes incrementally and avoids malformed bilingual prompt on single-language meetings', async () => {
+    mocked.openaiResponse.mockResolvedValue(
+      (async function* () {
+        yield { type: 'response.output_text.delta', delta: '# 会议\n\n' };
+        yield { type: 'response.output_text.delta', delta: '第二段' };
+        yield { type: 'response.completed' };
+      })(),
+    );
+    const response = await app.request('/api/minutes/stream', {
+      method: 'POST',
+      headers: { 'x-openai-api-key': 'test-key', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        provider: 'openai',
+        model: 'gpt-5-mini',
+        text: '討論內容',
+        targetLanguage: '雙語對照',
+        meetingLanguages: '繁體中文',
+        action: 'polish',
+        style: 'standard',
+      }),
+    });
+    const body = await response.text();
+    const deltas = body
+      .split('\n\n')
+      .filter((frame) => frame.startsWith('event: delta'))
+      .map((frame) => JSON.parse(frame.split('\ndata: ')[1]).text);
+    expect(deltas).toEqual(['# 會議\n\n', '第二段']);
+    const instruction = mocked.openaiResponse.mock.calls[0][0].instructions;
+    expect(instruction).not.toContain('in both selected languages (繁體中文)');
+    expect(instruction).toContain('in 繁體中文');
+  });
+
+  it('returns 401 auth_failed for file transcription authentication failures while preserving cleanupWarning', async () => {
+    mocked.openaiTranscribe.mockRejectedValue(
+      Object.assign(new Error('invalid key'), { status: 401 }),
+    );
+    const openaiData = form();
+    openaiData.set('provider', 'openai');
+    const openaiRes = await app.request('/api/transcribe-file', {
+      method: 'POST',
+      headers: { 'x-openai-api-key': 'bad-key' },
+      body: openaiData,
+    });
+    expect(openaiRes.status).toBe(401);
+    expect(await openaiRes.json()).toEqual({ error: 'auth_failed' });
+
+    mocked.generate.mockRejectedValue(Object.assign(new Error('forbidden'), { status: 403 }));
+    mocked.remove.mockRejectedValue(new Error('cleanup failed'));
+    const geminiRes = await app.request('/api/transcribe-file', {
+      method: 'POST',
+      headers: { 'x-gemini-api-key': 'bad-key' },
+      body: form(),
+    });
+    expect(geminiRes.status).toBe(401);
+    expect(await geminiRes.json()).toEqual({ error: 'auth_failed', cleanupWarning: true });
   });
 });

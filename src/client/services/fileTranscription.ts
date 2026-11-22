@@ -1,4 +1,5 @@
-import { splitAudio } from '../audio/audioChunker';
+import { OPENAI_MAX_AUDIO_SECONDS, splitAudio } from '../audio/audioChunker';
+import { normalizeAudioMime } from '../audio/audioMime';
 import { uploadedSegments, type FileTranscriptionResult } from '../audio/uploadedSegments';
 import { getRecordingBlob, saveRecordingSegments, type Recording } from '../db/meetingDb';
 import type { TranscriptSegment } from '../../shared/types';
@@ -19,7 +20,11 @@ export async function* transcribeAudio(
   completedParts = 0,
 ) {
   signal.throwIfAborted();
-  for await (const part of splitAudio(file, completedParts, signal)) {
+  const checkDuration =
+    settings.sttProvider === 'openai' &&
+    (recording.durationSeconds === undefined ||
+      recording.durationSeconds >= OPENAI_MAX_AUDIO_SECONDS);
+  for await (const part of splitAudio(file, completedParts, signal, checkDuration)) {
     onPartStart(part.index, part.total);
     const form = new FormData();
     form.set('provider', settings.sttProvider);
@@ -42,7 +47,9 @@ export async function* transcribeAudio(
           ? '轉錄失敗且無法刪除 Google 暫存檔，請至供應商管理介面檢查。'
           : result.error === 'missing_api_key'
             ? '請先在設定中加入轉錄服務金鑰。'
-            : '音檔轉錄失敗，請檢查模型、金鑰及後端服務。',
+            : result.error === 'auth_failed'
+              ? 'API 金鑰驗證失敗或無此模型權限，請檢查設定。'
+              : '音檔轉錄失敗，請檢查模型、金鑰及後端服務。',
       );
     }
     const result: FileTranscriptionResult = await response.json();
@@ -67,9 +74,9 @@ export async function transcribeSavedRecording(
   const blob = await getRecordingBlob(recording);
   signal.throwIfAborted();
   if (!blob.size) throw new Error('此錄音沒有可轉錄的音訊片段。');
-  const file = new File([blob], recordingFilename(recording), {
-    type: blob.type.replace(/^video\//, 'audio/'),
-  });
+  const filename = recordingFilename(recording);
+  const mimeType = normalizeAudioMime(blob.type || recording.mimeType, filename) || 'audio/webm';
+  const file = new File([blob], filename, { type: mimeType });
   const segments: TranscriptSegment[] = [];
   for await (const part of transcribeAudio(file, options)) {
     segments.push(...part.segments);

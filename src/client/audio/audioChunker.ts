@@ -1,5 +1,7 @@
 const RATE = 16000;
 const SECONDS = 600;
+const MIN_PART_SECONDS = 0.2;
+export const OPENAI_MAX_AUDIO_SECONDS = 1200;
 export function encodeWav(samples: Float32Array, rate = RATE): Blob {
   const buffer = new ArrayBuffer(44 + samples.length * 2),
     view = new DataView(buffer);
@@ -29,9 +31,11 @@ export async function* splitAudio(
   file: File,
   completedParts = 0,
   signal?: AbortSignal,
+  forceSplit = false,
 ): AsyncGenerator<{ file: File; offsetMs: number; index: number; total: number }> {
   signal?.throwIfAborted();
-  if (file.size <= 23 * 1024 * 1024) {
+  const fitsUpload = file.size <= 23 * 1024 * 1024;
+  if (fitsUpload && (!forceSplit || typeof AudioContext === 'undefined')) {
     if (!completedParts) yield { file, offsetMs: 0, index: 1, total: 1 };
     return;
   }
@@ -39,12 +43,30 @@ export async function* splitAudio(
   try {
     const buffer = await file.arrayBuffer();
     signal?.throwIfAborted();
-    const audio = await context.decodeAudioData(buffer);
-    const total = Math.ceil(audio.duration / SECONDS);
+    const audio = await context.decodeAudioData(buffer).catch((error: unknown) => {
+      // A provider can accept codecs that the browser cannot decode locally.
+      if (!fitsUpload) throw error;
+      return undefined;
+    });
+    signal?.throwIfAborted();
+    if (fitsUpload && (!audio || audio.duration <= OPENAI_MAX_AUDIO_SECONDS)) {
+      if (!completedParts) yield { file, offsetMs: 0, index: 1, total: 1 };
+      return;
+    }
+    if (!audio) return;
+    const ranges: { offset: number; duration: number }[] = [];
+    for (let offset = 0; offset < audio.duration; offset += SECONDS) {
+      ranges.push({ offset, duration: Math.min(SECONDS, audio.duration - offset) });
+    }
+    const tail = ranges.at(-1);
+    if (ranges.length >= 2 && tail && tail.duration < MIN_PART_SECONDS) {
+      ranges.pop();
+      ranges[ranges.length - 1].duration += tail.duration;
+    }
+    const total = ranges.length;
     for (let index = completedParts; index < total; index++) {
       signal?.throwIfAborted();
-      const offset = index * SECONDS,
-        duration = Math.min(SECONDS, audio.duration - offset);
+      const { offset, duration } = ranges[index];
       const offline = new OfflineAudioContext(1, Math.ceil(duration * RATE), RATE);
       const source = offline.createBufferSource();
       source.buffer = audio;
@@ -62,6 +84,6 @@ export async function* splitAudio(
       };
     }
   } finally {
-    await context.close();
+    await context.close().catch(() => {});
   }
 }
