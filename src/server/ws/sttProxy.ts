@@ -76,7 +76,8 @@ export function attachSttProxy(server: Server, connect: UpstreamFactory = connec
         }
         started = true;
         clearTimeout(timeout);
-        const start = data as SttStart;
+        const rawStart = data as SttStart;
+        const start: SttStart = { ...rawStart, model: rawStart.model.trim() };
         provider = start.provider;
         const key =
           start.apiKey?.trim() ||
@@ -100,6 +101,35 @@ export function attachSttProxy(server: Server, connect: UpstreamFactory = connec
             ),
           ),
         );
+        upstream.on('unexpected-response', (_req, res) => {
+          res.resume();
+          const status = res.statusCode ?? 0;
+          if (status === 401 || status === 403) {
+            closing = true;
+            send({
+              type: 'error',
+              code: 'auth_failed',
+              message: '即時轉錄驗證失敗，請檢查 API 金鑰與模型權限。',
+              recoverable: false,
+            });
+            upstream?.terminate();
+            client.close(1008);
+            return;
+          }
+          if (status === 400 || status === 404) {
+            closing = true;
+            send({
+              type: 'error',
+              code: 'provider_error',
+              message: '即時轉錄模型或請求無效，請檢查模型設定。',
+              recoverable: false,
+            });
+            upstream?.terminate();
+            client.close(1008);
+            return;
+          }
+          upstream?.terminate();
+        });
         upstream.on('message', (message) => {
           let parsed: Record<string, unknown>;
           try {
@@ -110,11 +140,17 @@ export function attachSttProxy(server: Server, connect: UpstreamFactory = connec
           for (const event of map(parsed)) {
             if (event.type === 'session.ready') ready = true;
             send(event);
-            if (event.type === 'session.reconnecting') upstream?.close();
+            if (event.type === 'session.reconnecting') {
+              closing = true;
+              client.close(1012);
+              upstream?.close();
+              break;
+            }
             if (event.type === 'error') {
               closing = true;
               upstream?.close();
               client.close(1008);
+              break;
             }
           }
         });
@@ -145,8 +181,10 @@ export function attachSttProxy(server: Server, connect: UpstreamFactory = connec
       if (
         data?.type === 'audio.chunk' &&
         typeof data.pcm16Base64 === 'string' &&
+        data.pcm16Base64.length > 0 &&
+        data.pcm16Base64.length % 4 === 0 &&
         data.pcm16Base64.length <= 32000 &&
-        /^[A-Za-z0-9+/]*={0,2}$/.test(data.pcm16Base64)
+        /^[A-Za-z0-9+/]+={0,2}$/.test(data.pcm16Base64)
       ) {
         upstream.send(
           JSON.stringify(
@@ -172,6 +210,7 @@ export function attachSttProxy(server: Server, connect: UpstreamFactory = connec
     });
     client.on('error', () => {
       closing = true;
+      clearTimeout(timeout);
       upstream?.close();
     });
   });

@@ -99,6 +99,16 @@ export async function saveAudioChunk(
 ): Promise<void> {
   await (await db()).put('audioChunks', { recordingId, sequence, blob });
 }
+export async function saveUploadedRecording(recording: Recording, file: Blob): Promise<void> {
+  const tx = (await db()).transaction(['meetings', 'recordings', 'audioChunks'], 'readwrite');
+  if (!(await tx.objectStore('meetings').get(recording.meetingId))) {
+    await tx.done;
+    throw new Error('meeting not found');
+  }
+  await tx.objectStore('recordings').put({ ...recording, completed: true });
+  await tx.objectStore('audioChunks').put({ recordingId: recording.id, sequence: 0, blob: file });
+  await tx.done;
+}
 export async function listRecordings(meetingId: string): Promise<Recording[]> {
   return (await (await db()).getAllFromIndex('recordings', 'by-meeting', meetingId)).sort(
     (a, b) => b.createdAt - a.createdAt,

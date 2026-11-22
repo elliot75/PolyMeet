@@ -124,4 +124,34 @@ describe('meeting deletion', () => {
     await expect(saveSegment(segment)).rejects.toThrow('meeting not found');
     await expect(saveMinutes(minutes)).rejects.toThrow('meeting not found');
   });
+
+  it('atomically saves uploaded recording metadata and blob only when the meeting exists', async () => {
+    const { saveUploadedRecording } = await import('../src/client/db/meetingDb');
+    const meeting = {
+      id: 'upload-atomic',
+      title: 'Upload',
+      createdAt: 10,
+      notes: '',
+      mode: '一般會議',
+    };
+    await saveMeeting(meeting);
+    const rec = {
+      id: 'upload-rec-1',
+      meetingId: meeting.id,
+      createdAt: 11,
+      mimeType: 'audio/wav',
+      filename: 'clip.wav',
+      completed: false,
+    };
+    await saveUploadedRecording(rec, new Blob(['wave-bytes'], { type: 'audio/wav' }));
+    expect(await listRecordings(meeting.id)).toEqual([{ ...rec, completed: true }]);
+    expect(await (await getRecordingBlob(rec)).text()).toBe('wave-bytes');
+
+    const missing = { ...rec, id: 'upload-rec-missing', meetingId: 'nonexistent-meeting' };
+    await expect(saveUploadedRecording(missing, new Blob(['x']))).rejects.toThrow(
+      'meeting not found',
+    );
+    expect(await listRecordings('nonexistent-meeting')).toEqual([]);
+    expect((await getRecordingBlob(missing)).size).toBe(0);
+  });
 });

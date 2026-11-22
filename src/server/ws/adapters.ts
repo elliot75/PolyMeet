@@ -52,6 +52,13 @@ export function createEventMapper(start: SttStart) {
     ((text: string, _language?: string) => text);
   let geminiId = randomUUID();
   const partial = new Map<string, string>();
+  const setPartial = (id: string, text: string) => {
+    if (!partial.has(id) && partial.size >= 200) {
+      const oldest = partial.keys().next().value;
+      if (oldest !== undefined) partial.delete(oldest);
+    }
+    partial.set(id, text);
+  };
   return (data: Record<string, any>): SttServerEvent[] => {
     const events: SttServerEvent[] = [];
     if (start.provider === 'openai') {
@@ -65,7 +72,7 @@ export function createEventMapper(start: SttStart) {
       ) {
         const id = String(data.item_id || 'current');
         const text = (partial.get(id) || '') + data.delta;
-        partial.set(id, text);
+        setPartial(id, text);
         events.push({
           type: 'transcript.interim',
           segmentId: id,
@@ -83,6 +90,16 @@ export function createEventMapper(start: SttStart) {
           type: 'transcript.final',
           segmentId: id,
           text: convert(data.transcript, data.language),
+          track: start.track,
+        });
+      }
+      if (data.type === 'conversation.item.input_audio_transcription.failed') {
+        const id = String(data.item_id || 'current');
+        partial.delete(id);
+        events.push({
+          type: 'transcript.final',
+          segmentId: id,
+          text: '',
           track: start.track,
         });
       }

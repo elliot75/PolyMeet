@@ -6,6 +6,7 @@ const mocked = vi.hoisted(() => ({
   generate: vi.fn(),
   openaiTranscribe: vi.fn(),
   openaiResponse: vi.fn(),
+  openaiModels: vi.fn(),
 }));
 vi.mock('@google/genai', () => ({
   GoogleGenAI: class {
@@ -19,6 +20,7 @@ vi.mock('openai', () => ({
   default: class {
     audio = { transcriptions: { create: mocked.openaiTranscribe } };
     responses = { create: mocked.openaiResponse };
+    models = { list: mocked.openaiModels };
   },
 }));
 import { app } from '../src/server/app';
@@ -141,5 +143,49 @@ describe('provider routes with simulated services', () => {
     expect(mocked.openaiResponse.mock.calls[0][0].instructions).toContain(
       'specified output language',
     );
+  });
+
+  it('strips codec parameters from uploaded audio MIME types and trims stream parameters', async () => {
+    const data = new FormData();
+    data.set('provider', 'gemini');
+    data.set('model', '  gemini-3.8-flash  ');
+    data.set('file', new File(['audio'], 'recording.webm', { type: 'audio/webm;codecs=opus' }));
+    const uploadRes = await app.request('/api/transcribe-file', {
+      method: 'POST',
+      headers: { 'x-gemini-api-key': 'test-key' },
+      body: data,
+    });
+    expect(uploadRes.status).toBe(200);
+    expect(mocked.upload.mock.calls[0][0].config).toEqual({ mimeType: 'audio/webm' });
+
+    mocked.openaiResponse.mockResolvedValue(
+      (async function* () {
+        yield { type: 'response.output_text.delta', delta: 'ok' };
+      })(),
+    );
+    const translateRes = await app.request('/api/translate/stream', {
+      method: 'POST',
+      headers: { 'x-openai-api-key': 'test-key', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        provider: 'openai',
+        model: '  gpt-5-mini  ',
+        text: 'hello',
+        sourceLanguage: '   ',
+        targetLanguage: '繁體中文',
+      }),
+    });
+    expect(translateRes.status).toBe(200);
+    expect(mocked.openaiResponse.mock.calls[0][0].model).toBe('gpt-5-mini');
+    expect(mocked.openaiResponse.mock.calls[0][0].instructions).toContain(
+      'between the detected language and 繁體中文',
+    );
+    expect(mocked.openaiResponse.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
+
+    mocked.openaiModels.mockRejectedValue(Object.assign(new Error('bad key'), { status: 401 }));
+    const modelsRes = await app.request('/api/models?provider=openai', {
+      headers: { 'x-openai-api-key': 'bad-key' },
+    });
+    expect(modelsRes.status).toBe(401);
+    expect(await modelsRes.json()).toEqual({ error: 'auth_failed' });
   });
 });

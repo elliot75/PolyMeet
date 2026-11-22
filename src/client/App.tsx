@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { SettingsDialog } from './components/SettingsDialog';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { SettingsDialog, type ServerHealth } from './components/SettingsDialog';
 import { MinutesStudio } from './components/MinutesStudio';
 import { TranscriptFeed } from './components/TranscriptFeed';
 import { LiveCapture } from './audio/liveCapture';
@@ -7,6 +7,7 @@ import { SegmentTimeline } from './audio/segmentTimeline';
 import { TranslationQueue } from './services/translationQueue';
 import { ProjectionOverlay } from './components/ProjectionOverlay';
 import { DeleteMeetingDialog } from './components/DeleteMeetingDialog';
+import { formatTimestamp } from './services/exporter';
 import type { AudioTrackRole, TranscriptSegment } from '../shared/types';
 import { languageCode, languages } from '../shared/languages';
 import { loadSettings, saveSettings, type Settings } from './services/settings';
@@ -25,8 +26,99 @@ import {
   type Meeting,
   type Recording,
 } from './db/meetingDb';
+import {
+  IconAlertCircle,
+  IconBrandMark,
+  IconDownload,
+  IconFileText,
+  IconMenu,
+  IconMic,
+  IconPause,
+  IconPlus,
+  IconRefresh,
+  IconSearch,
+  IconSparkles,
+  IconStop,
+  IconSwap,
+  IconX,
+} from './components/Icons';
 
-function RecordingPlayer({ recording }: { recording: Recording }) {
+type AudioLevels = { mic: number; system: number };
+type LevelSubscriber = (levels: AudioLevels) => void;
+
+const WAVE_WEIGHTS = [0.38, 0.68, 0.52, 0.94, 0.8, 0.62, 0.88, 0.48, 0.35];
+
+const LiveWaveBars = memo(function LiveWaveBars({
+  active,
+  subscribeLevels,
+}: {
+  active: boolean;
+  subscribeLevels: (listener: LevelSubscriber) => () => void;
+}) {
+  const [levels, setLevels] = useState<AudioLevels>({ mic: 0, system: 0 });
+
+  useEffect(() => {
+    if (!active) {
+      setLevels({ mic: 0, system: 0 });
+      return;
+    }
+    return subscribeLevels(setLevels);
+  }, [active, subscribeLevels]);
+
+  const level = active ? Math.min(1, Math.max(levels.mic, levels.system) * 5.5) : 0;
+
+  return (
+    <div className={`wave-bars ${active ? 'active' : ''}`} aria-hidden="true">
+      {WAVE_WEIGHTS.map((weight, index) => (
+        <span
+          key={index}
+          style={{
+            transform: `scaleY(${active ? 0.25 + level * weight : weight * 0.45})`,
+          }}
+        />
+      ))}
+    </div>
+  );
+});
+
+const AudioMeters = memo(function AudioMeters({
+  active,
+  both,
+  subscribeLevels,
+}: {
+  active: boolean;
+  both: boolean;
+  subscribeLevels: (listener: LevelSubscriber) => () => void;
+}) {
+  const [levels, setLevels] = useState<AudioLevels>({ mic: 0, system: 0 });
+
+  useEffect(() => {
+    if (!active) {
+      setLevels({ mic: 0, system: 0 });
+      return;
+    }
+    return subscribeLevels(setLevels);
+  }, [active, subscribeLevels]);
+
+  if (!active) return null;
+
+  return (
+    <div className="levels">
+      <label>
+        <span>麥克風音量</span>
+        <meter min="0" max="0.2" value={levels.mic} />
+      </label>
+      {both && (
+        <label>
+          <span>分頁音量</span>
+          <meter min="0" max="0.2" value={levels.system} />
+        </label>
+      )}
+    </div>
+  );
+});
+
+const RecordingPlayer = memo(function RecordingPlayer({ recording }: { recording: Recording }) {
   const [url, setUrl] = useState('');
   useEffect(() => {
     let active = true;
@@ -43,7 +135,8 @@ function RecordingPlayer({ recording }: { recording: Recording }) {
       active = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [recording]);
+  }, [recording.id, recording.completed, recording.mimeType]);
+
   const extension = recording.mimeType.includes('mp4')
     ? 'm4a'
     : recording.mimeType.includes('ogg')
@@ -57,36 +150,47 @@ function RecordingPlayer({ recording }: { recording: Recording }) {
             : recording.mimeType.includes('aac')
               ? 'aac'
               : 'webm';
+
   return (
     <div className="audio">
-      <span>
-        {new Date(recording.createdAt).toLocaleString('zh-TW')}{' '}
-        {recording.durationSeconds !== undefined
-          ? ` · ${Math.floor(recording.durationSeconds / 60)}:${String(Math.floor(recording.durationSeconds % 60)).padStart(2, '0')}`
-          : ''}{' '}
-        {recording.completed ? '' : '（錄音中斷，已保存部分）'}
-      </span>
+      <div className="audio-meta">
+        <span>
+          {recording.filename ? `${recording.filename} · ` : ''}
+          {new Date(recording.createdAt).toLocaleString('zh-TW')}
+          {recording.durationSeconds !== undefined
+            ? ` · ${formatTimestamp(recording.durationSeconds * 1000)}`
+            : ''}
+        </span>
+        {!recording.completed && <span className="pill-warn">錄音中斷・已保存片段</span>}
+      </div>
       {url ? (
-        <>
+        <div className="audio-controls">
           <audio id={`audio-${recording.id}`} controls preload="metadata" src={url} />
           <a
+            className="secondary small-button audio-download"
             href={url}
             download={recording.filename || `polymeet-${recording.createdAt}.${extension}`}
           >
-            下載錄音
+            <IconDownload size={14} />
+            <span>下載音檔</span>
           </a>
-        </>
+        </div>
       ) : (
         <small>沒有可播放的錄音片段</small>
       )}
     </div>
   );
-}
+});
+
 export function App() {
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [query, setQuery] = useState('');
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [studioTab, setStudioTab] = useState<'notes' | 'minutes'>('notes');
+  const [minutesCount, setMinutesCount] = useState(0);
   const [settings, setSettings] = useState<Settings>(loadSettings);
+  const [serverHealth, setServerHealth] = useState<ServerHealth | null>(null);
   const [recording, setRecording] = useState(false);
   const [savingRecording, setSavingRecording] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -98,21 +202,82 @@ export function App() {
   const [liveEnabled, setLiveEnabled] = useState(true);
   const [liveStatus, setLiveStatus] = useState('');
   const [translationStatus, setTranslationStatus] = useState('');
-  const [levels, setLevels] = useState({ mic: 0, system: 0 });
   const [interims, setInterims] = useState<Record<string, { track: AudioTrackRole; text: string }>>(
     {},
   );
   const [error, setError] = useState('');
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [segments, setSegments] = useState<TranscriptSegment[]>([]);
+
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selected;
+  const meetingsRef = useRef<Meeting[]>([]);
+  meetingsRef.current = meetings;
   const recorder = useRef<MediaRecorder | null>(null);
   const streams = useRef<MediaStream[]>([]);
   const liveCapture = useRef<LiveCapture | null>(null);
   const mixContext = useRef<AudioContext | null>(null);
+  const translationQueueRef = useRef<TranslationQueue | null>(null);
   const saveQueue = useRef<Promise<void>>(Promise.resolve());
+  const pendingSavesRef = useRef(new Map<string, Meeting>());
+  const saveTimerRef = useRef<number | undefined>(undefined);
+  const recordingClockRef = useRef({ startedAtMs: 0, pausedAccumMs: 0, pausedAtMs: 0 });
+  const levelSubscribersRef = useRef(new Set<LevelSubscriber>());
+  const levelsRef = useRef<AudioLevels>({ mic: 0, system: 0 });
+  const drawerCloseRef = useRef<HTMLButtonElement>(null);
+  const mobileMenuButtonRef = useRef<HTMLButtonElement>(null);
+  const wasDrawerOpenRef = useRef(false);
+
   const meeting = meetings.find((m) => m.id === selected);
+  const workspaceLocked = recording || busy || uploading || generating;
+
+  const subscribeLevels = useCallback((listener: LevelSubscriber) => {
+    levelSubscribersRef.current.add(listener);
+    listener(levelsRef.current);
+    return () => {
+      levelSubscribersRef.current.delete(listener);
+    };
+  }, []);
+
+  const publishLevels = useCallback((next: AudioLevels) => {
+    levelsRef.current = next;
+    for (const listener of levelSubscribersRef.current) listener(next);
+  }, []);
+
+  const flushPendingSaves = useCallback(() => {
+    window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = undefined;
+    if (!pendingSavesRef.current.size) return saveQueue.current;
+    const batch = [...pendingSavesRef.current.values()];
+    pendingSavesRef.current.clear();
+    saveQueue.current = saveQueue.current
+      .catch(() => {})
+      .then(() => Promise.all(batch.map((item) => saveMeeting(item))).then(() => undefined))
+      .catch(() => {
+        setError('無法儲存會議資料，請檢查瀏覽器儲存空間。');
+      });
+    return saveQueue.current;
+  }, []);
+
+  const refreshHealth = useCallback(async () => {
+    try {
+      const response = await fetch('/api/health');
+      if (!response.ok) throw new Error();
+      const data = await response.json();
+      setServerHealth({
+        ok: true,
+        openai: Boolean(data?.serverKeys?.openai),
+        gemini: Boolean(data?.serverKeys?.gemini),
+      });
+    } catch {
+      setServerHealth({ ok: false, openai: false, gemini: false });
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshHealth();
+  }, [refreshHealth]);
+
   useEffect(() => {
     let active = true;
     (async () => {
@@ -140,11 +305,16 @@ export function App() {
       active = false;
     };
   }, []);
+
   useEffect(() => {
     let active = true;
     setRecordings([]);
     setSegments([]);
-    if (selected)
+    setMinutesCount(0);
+    setLiveStatus('');
+    setTranslationStatus('');
+    setError('');
+    if (selected) {
       listSegments(selected)
         .then((items) => {
           if (active) setSegments(items);
@@ -152,28 +322,64 @@ export function App() {
         .catch(() => {
           if (active) setError('無法讀取逐字稿。');
         });
-    if (selected)
       listRecordings(selected)
         .then((items) => {
           if (active) setRecordings(items);
         })
-        .catch(() => setError('無法讀取錄音。'));
+        .catch(() => {
+          if (active) setError('無法讀取錄音。');
+        });
+    }
     return () => {
       active = false;
     };
   }, [selected]);
-  useEffect(
-    () => () => {
+
+  useEffect(() => {
+    const flushOnHide = () => {
+      if (document.visibilityState === 'hidden') void flushPendingSaves();
+    };
+    document.addEventListener('visibilitychange', flushOnHide);
+    return () => {
+      document.removeEventListener('visibilitychange', flushOnHide);
+      void flushPendingSaves();
+      void liveCapture.current?.stop().catch(() => {});
+      translationQueueRef.current?.cancel();
       streams.current.forEach((stream) => stream.getTracks().forEach((t) => t.stop()));
       if (mixContext.current?.state !== 'closed') void mixContext.current?.close().catch(() => {});
-    },
-    [],
-  );
+    };
+  }, [flushPendingSaves]);
+
   useEffect(() => {
     if (!recording || paused) return;
-    const timer = window.setInterval(() => setElapsed((value) => value + 1), 1000);
+    const updateClock = () => {
+      const clock = recordingClockRef.current;
+      if (!clock.startedAtMs) return;
+      setElapsed(
+        Math.max(0, Math.floor((Date.now() - clock.startedAtMs - clock.pausedAccumMs) / 1000)),
+      );
+    };
+    updateClock();
+    const timer = window.setInterval(updateClock, 500);
     return () => window.clearInterval(timer);
   }, [recording, paused]);
+
+  useEffect(() => {
+    if (drawerOpen) {
+      wasDrawerOpenRef.current = true;
+      drawerCloseRef.current?.focus();
+    } else if (wasDrawerOpenRef.current) {
+      wasDrawerOpenRef.current = false;
+      mobileMenuButtonRef.current?.focus();
+    }
+    if (!drawerOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setDrawerOpen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [drawerOpen]);
+
   useEffect(() => {
     if (!recording && !savingRecording) return;
     const warn = (event: BeforeUnloadEvent) => {
@@ -197,14 +403,19 @@ export function App() {
       document.removeEventListener('visibilitychange', saveOnHidden);
     };
   }, [recording, savingRecording]);
-  function persist(m: Meeting) {
-    saveQueue.current = saveQueue.current
-      .catch(() => {})
-      .then(() => saveMeeting(m))
-      .catch(() => {
-        setError('無法儲存會議資料，請檢查瀏覽器儲存空間。');
-      });
+
+  function persist(m: Meeting, immediate = false) {
+    pendingSavesRef.current.set(m.id, m);
+    if (immediate) {
+      void flushPendingSaves();
+      return;
+    }
+    window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = window.setTimeout(() => {
+      void flushPendingSaves();
+    }, 180);
   }
+
   function create() {
     const m: Meeting = {
       id: crypto.randomUUID(),
@@ -215,16 +426,36 @@ export function App() {
     };
     setMeetings((old) => [m, ...old]);
     setSelected(m.id);
-    persist(m);
+    setDrawerOpen(false);
+    persist(m, true);
   }
-  function update(patch: Partial<Meeting>) {
+
+  function update(patch: Partial<Meeting>, immediate = false) {
     if (!meeting) return;
     const next = { ...meeting, ...patch };
     setMeetings((old) => old.map((m) => (m.id === selected ? next : m)));
-    persist(next);
+    persist(next, immediate);
   }
+
+  function changeMode(nextMode: string) {
+    if (!meeting) return;
+    const src = meeting.sourceLang || '繁體中文';
+    let tgt = meeting.targetLang || 'English';
+    if (nextMode === '雙語會議' && src === tgt) {
+      tgt = src === 'English' ? '繁體中文' : 'English';
+    }
+    update({ mode: nextMode, sourceLang: src, targetLang: tgt }, true);
+  }
+
+  function swapLanguages() {
+    if (!meeting) return;
+    const src = meeting.sourceLang || '繁體中文';
+    const tgt = meeting.targetLang || 'English';
+    update({ sourceLang: tgt, targetLang: src }, true);
+  }
+
   async function start() {
-    if (!meeting || busy || uploading) return;
+    if (!meeting || busy || uploading || generating) return;
     if (
       meeting.mode === '雙語會議' &&
       (meeting.sourceLang || '繁體中文') === (meeting.targetLang || 'English')
@@ -238,6 +469,7 @@ export function App() {
     setInterims({});
     setLiveStatus('');
     setTranslationStatus('');
+    publishLevels({ mic: 0, system: 0 });
     let mic: MediaStream | undefined, display: MediaStream | undefined;
     let mixer: AudioContext | undefined, live: LiveCapture | undefined;
     try {
@@ -257,6 +489,7 @@ export function App() {
       let recordingStream = mic;
       if (display) {
         mixer = new AudioContext();
+        if (mixer.state === 'suspended') await mixer.resume();
         mixContext.current = mixer;
         const merger = mixer.createChannelMerger(2),
           destination = mixer.createMediaStreamDestination();
@@ -273,20 +506,27 @@ export function App() {
         mimeType: r.mimeType || 'audio/webm',
         completed: false,
       };
-      await saveRecording(saved);
       let startedAt = Date.now(),
         pausedAt = 0,
         pausedDuration = 0;
+      recordingClockRef.current = { startedAtMs: startedAt, pausedAccumMs: 0, pausedAtMs: 0 };
       const timeline = new SegmentTimeline();
       r.onstart = () => {
         startedAt = Date.now();
+        recordingClockRef.current = { startedAtMs: startedAt, pausedAccumMs: 0, pausedAtMs: 0 };
       };
       r.onpause = () => {
         pausedAt = Date.now();
+        recordingClockRef.current.pausedAtMs = pausedAt;
       };
       r.onresume = () => {
-        if (pausedAt) pausedDuration += Date.now() - pausedAt;
+        const now = Date.now();
+        if (pausedAt) pausedDuration += now - pausedAt;
         pausedAt = 0;
+        if (recordingClockRef.current.pausedAtMs) {
+          recordingClockRef.current.pausedAccumMs += now - recordingClockRef.current.pausedAtMs;
+          recordingClockRef.current.pausedAtMs = 0;
+        }
       };
       if (liveEnabled) {
         const translations =
@@ -307,9 +547,14 @@ export function App() {
                       setError('無法保存譯文。'),
                     );
                 },
-                () => setTranslationStatus('翻譯失敗，請檢查翻譯模型和金鑰。'),
+                () => {
+                  if (selectedRef.current === saved.meetingId)
+                    setTranslationStatus('翻譯失敗，請檢查翻譯模型和金鑰。');
+                },
               )
             : null;
+        translationQueueRef.current?.cancel();
+        translationQueueRef.current = translations;
         live = new LiveCapture();
         liveCapture.current = live;
         const provider = settings.liveProvider;
@@ -397,7 +642,7 @@ export function App() {
                 .catch(() => setError('無法保存即時逐字稿，請檢查儲存空間。'));
             }
           },
-          (role, level) => setLevels((old) => ({ ...old, [role]: level })),
+          (role, level) => publishLevels({ ...levelsRef.current, [role]: level }),
           (role) => {
             const position = Math.max(0, Date.now() - startedAt - pausedDuration - 100);
             timeline.noteSpeech(role, position);
@@ -405,6 +650,7 @@ export function App() {
         );
         setLiveStatus('即時轉錄連線中…');
       }
+      await saveRecording(saved);
       recorder.current = r;
       let sequence = 0;
       let writes = Promise.resolve();
@@ -450,10 +696,11 @@ export function App() {
                 Math.floor((stoppedAt - startedAt - pausedDuration) / 1000),
               ),
             });
-          setRecordings(await listRecordings(saved.meetingId));
+          const updatedRecordings = await listRecordings(saved.meetingId);
+          if (selectedRef.current === saved.meetingId) setRecordings(updatedRecordings);
           setLiveStatus('');
           setInterims({});
-          setLevels({ mic: 0, system: 0 });
+          publishLevels({ mic: 0, system: 0 });
         })()
           .catch(() => setError('無法完成錄音保存，已保存的片段仍可恢復。'))
           .finally(() => {
@@ -473,8 +720,13 @@ export function App() {
       mic?.getTracks().forEach((t) => t.stop());
       display?.getTracks().forEach((t) => t.stop());
       if (live) void live.stop().catch(() => {});
+      liveCapture.current = null;
       if (mixer && mixer.state !== 'closed') void mixer.close().catch(() => {});
+      mixContext.current = null;
+      translationQueueRef.current?.cancel();
+      translationQueueRef.current = null;
       streams.current = [];
+      publishLevels({ mic: 0, system: 0 });
       setError(
         e instanceof Error && e.message.startsWith('未選擇')
           ? e.message
@@ -483,9 +735,11 @@ export function App() {
       setBusy(false);
     }
   }
+
   function stop() {
     if (recorder.current?.state !== 'inactive') recorder.current?.stop();
   }
+
   async function togglePause() {
     const r = recorder.current;
     if (!r || busy) return;
@@ -506,401 +760,601 @@ export function App() {
       if (r.state !== 'inactive') setBusy(false);
     }
   }
+
+  const languageHints = useMemo(
+    () =>
+      [
+        languageCode(meeting?.sourceLang || '繁體中文'),
+        ...(meeting?.mode === '雙語會議' ? [languageCode(meeting?.targetLang || 'English')] : []),
+      ].filter((value): value is string => Boolean(value)),
+    [meeting?.mode, meeting?.sourceLang, meeting?.targetLang],
+  );
+
+  const meetingLanguages = useMemo(
+    () =>
+      meeting?.mode === '雙語會議'
+        ? [meeting.sourceLang || '繁體中文', meeting.targetLang || 'English']
+        : [meeting?.sourceLang || '繁體中文'],
+    [meeting?.mode, meeting?.sourceLang, meeting?.targetLang],
+  );
+
+  const minutesText = useMemo(
+    () =>
+      [
+        meeting?.notes || '',
+        ...segments.map((segment) =>
+          segment.translation
+            ? `${segment.speakerLabel}: ${segment.text}\n譯文: ${segment.translation}`
+            : `${segment.speakerLabel}: ${segment.text}`,
+        ),
+      ]
+        .filter(Boolean)
+        .join('\n\n'),
+    [meeting?.notes, segments],
+  );
+
+  const handleAppendSegment = useCallback((segment: TranscriptSegment) => {
+    if (selectedRef.current === segment.meetingId) setSegments((old) => [...old, segment]);
+  }, []);
+
+  const handleSegmentTextChange = useCallback((id: string, text: string) => {
+    setSegments((old) => old.map((item) => (item.id === id ? { ...item, text } : item)));
+  }, []);
+
+  const handleRecordingSaved = useCallback(() => {
+    const id = selectedRef.current;
+    if (!id) return;
+    void listRecordings(id)
+      .then((items) => {
+        if (selectedRef.current === id) setRecordings(items);
+      })
+      .catch(() => {
+        if (selectedRef.current === id) setError('無法讀取錄音。');
+      });
+  }, []);
+
+  const handleSeekRecording = useCallback((id: string, seconds: number) => {
+    const audio = document.getElementById(`audio-${id}`) as HTMLAudioElement | null;
+    if (!audio) return;
+    const jumpAndPlay = () => {
+      audio.currentTime = seconds;
+      audio.scrollIntoView({
+        block: 'center',
+        behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+      });
+      void audio.play().catch(() => setError('無法播放錄音，請使用錄音播放器。'));
+    };
+    if (audio.readyState < 1) {
+      audio.addEventListener('loadedmetadata', jumpAndPlay, { once: true });
+      audio.load();
+    } else {
+      jumpAndPlay();
+    }
+  }, []);
+
+  const handleSaveSettings = useCallback((value: Settings) => {
+    saveSettings(value);
+    setSettings(value);
+  }, []);
+
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredMeetings = meetings.filter(
+    (m) =>
+      !normalizedQuery ||
+      m.title.toLowerCase().includes(normalizedQuery) ||
+      m.notes.toLowerCase().includes(normalizedQuery),
+  );
+  const formattedElapsed = formatTimestamp(elapsed * 1000);
+
   return (
     <div className="app">
-      <aside className="sidebar">
-        <div className="brand">
-          <span className="brandmark">✳</span>
-          <span>
-            PolyMeet<small>MEETING WORKSPACE</small>
-          </span>
+      {drawerOpen && (
+        <div className="sidebar-backdrop" aria-hidden="true" onClick={() => setDrawerOpen(false)} />
+      )}
+      <aside className={`sidebar ${drawerOpen ? 'open' : ''}`} aria-label="會議側邊欄">
+        <div className="brand-row">
+          <div className="brand">
+            <span className="brandmark" aria-hidden="true">
+              <IconBrandMark size={20} />
+            </span>
+            <span>
+              PolyMeet<small>MEETING WORKSPACE</small>
+            </span>
+          </div>
+          <button
+            ref={drawerCloseRef}
+            type="button"
+            className="icon-button mobile-drawer-close"
+            aria-label="關閉會議列表"
+            onClick={() => setDrawerOpen(false)}
+          >
+            <IconX size={18} />
+          </button>
         </div>
-        <button
-          className="new"
-          onClick={create}
-          disabled={recording || busy || uploading || generating}
-        >
-          <span>＋</span> 新增會議
+
+        <button type="button" className="new" onClick={create} disabled={workspaceLocked}>
+          <IconPlus size={16} />
+          <span>新增會議</span>
         </button>
-        <div className="side-label">工作空間</div>
-        <div className="nav-active">
-          ▤ <span>所有會議</span>
+
+        <div className="side-label">
+          <span>會議列表</span>
           <span className="count">{meetings.length}</span>
         </div>
-        <div className="side-label history">最近的會議</div>
+
         <label className="search">
-          <span aria-hidden="true">⌕</span>
+          <IconSearch size={14} />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="搜尋會議"
+            placeholder="搜尋標題或筆記…"
             aria-label="搜尋會議"
           />
+          {query && (
+            <button
+              type="button"
+              className="search-clear"
+              aria-label="清除搜尋"
+              onClick={() => setQuery('')}
+            >
+              <IconX size={13} />
+            </button>
+          )}
         </label>
+
         <div className="meeting-list">
-          {meetings
-            .filter((m) => m.title.includes(query))
-            .map((m) => (
+          {filteredMeetings.length > 0 ? (
+            filteredMeetings.map((m) => (
               <button
                 key={m.id}
-                disabled={recording || busy || uploading || generating}
+                type="button"
+                disabled={workspaceLocked}
                 className={m.id === selected ? 'meeting selected' : 'meeting'}
                 onClick={() => {
                   setSelected(m.id);
+                  setDrawerOpen(false);
                 }}
               >
-                <span className="meeting-icon">▧</span>
-                <span>
-                  <strong>{m.title}</strong>
+                <span className="meeting-icon" aria-hidden="true">
+                  <IconFileText size={15} />
+                </span>
+                <span className="meeting-info">
+                  <span className="meeting-title-line">
+                    <strong>{m.title || '未命名會議'}</strong>
+                    {m.mode === '雙語會議' && <span className="meeting-mode-pill">雙語</span>}
+                  </span>
                   <small>{new Date(m.createdAt).toLocaleDateString('zh-TW')}</small>
                 </span>
               </button>
-            ))}
+            ))
+          ) : meetings.length > 0 ? (
+            <div className="sidebar-empty">
+              <p>找不到符合的會議</p>
+              <button type="button" className="secondary small-button" onClick={() => setQuery('')}>
+                清除搜尋
+              </button>
+            </div>
+          ) : (
+            <div className="sidebar-empty">
+              <p>尚無會議紀錄</p>
+            </div>
+          )}
         </div>
+
         <div className="sidebar-footer">
-          <span className="avatar">P</span>
+          <span className="avatar" aria-hidden="true">
+            P
+          </span>
           <span>
-            <strong>個人工作空間</strong>
-            <small>資料儲存於此瀏覽器</small>
+            <strong>本機工作空間</strong>
+            <small>資料保存於此瀏覽器</small>
           </span>
         </div>
       </aside>
+
       <main>
         <header className="topbar">
-          <span>
-            工作空間 <b>/</b> {meeting?.title || '所有會議'}
-          </span>
+          <div className="topbar-left">
+            <button
+              ref={mobileMenuButtonRef}
+              type="button"
+              className="icon-button mobile-menu-button"
+              aria-label="開啟會議列表"
+              aria-expanded={drawerOpen}
+              onClick={() => setDrawerOpen((value) => !value)}
+            >
+              <IconMenu size={18} />
+            </button>
+            <div className="breadcrumbs">
+              <span>工作空間</span>
+              <b>/</b>
+              <strong className="crumb-current">{meeting?.title || '歡迎使用'}</strong>
+            </div>
+          </div>
+
           <div className="top-actions">
-            <span className="local">
-              <i /> 本機工作區
-            </span>
+            {serverHealth === null ? (
+              <span className="health-pill checking">
+                <i /> 連線檢查中…
+              </span>
+            ) : serverHealth.ok ? (
+              <span className="health-pill online">
+                <i /> 本機後端已連線
+              </span>
+            ) : (
+              <button
+                type="button"
+                className="health-pill offline"
+                onClick={() => void refreshHealth()}
+              >
+                <IconRefresh size={12} />
+                <span>離線模式・點此重試</span>
+              </button>
+            )}
             <SettingsDialog
               settings={settings}
-              onSave={(value) => {
-                saveSettings(value);
-                setSettings(value);
-              }}
+              serverHealth={serverHealth}
+              onRefreshHealth={() => void refreshHealth()}
+              onSave={handleSaveSettings}
             />
           </div>
         </header>
+
         {error && !meeting && (
-          <p className="error global-error" role="alert">
-            {error}
-          </p>
+          <div className="global-error">
+            <p className="error" role="alert">
+              <IconAlertCircle size={16} />
+              <span>{error}</span>
+            </p>
+          </div>
         )}
+
         {meeting ? (
           <div className="workspace">
             <div className="heading">
-              <div>
-                <div className="eyebrow">YOUR MEETING SPACE</div>
+              <div className="heading-main">
+                <div className="eyebrow">MEETING WORKSPACE</div>
                 <input
                   className="title-input"
                   aria-label="會議名稱"
+                  placeholder="輸入會議名稱…"
                   value={meeting.title}
                   onChange={(e) => update({ title: e.target.value })}
                 />
-                <p>
-                  {new Date(meeting.createdAt).toLocaleDateString('zh-TW', {
-                    year: 'numeric',
-                    month: 'long',
-                    day: 'numeric',
-                    weekday: 'long',
-                  })}{' '}
-                  <span>·</span> {meeting.mode}
-                </p>
+                <div className="heading-meta">
+                  <span>
+                    {new Date(meeting.createdAt).toLocaleDateString('zh-TW', {
+                      year: 'numeric',
+                      month: 'long',
+                      day: 'numeric',
+                      weekday: 'short',
+                    })}
+                  </span>
+                  <span className="dot" aria-hidden="true">
+                    ·
+                  </span>
+                  <span>{meeting.mode}</span>
+                  <span className="dot" aria-hidden="true">
+                    ·
+                  </span>
+                  <span>{segments.length} 段逐字稿</span>
+                  {recordings.length > 0 && (
+                    <>
+                      <span className="dot" aria-hidden="true">
+                        ·
+                      </span>
+                      <span>{recordings.length} 份錄音</span>
+                    </>
+                  )}
+                </div>
               </div>
+
               <div className="heading-actions">
-                <DeleteMeetingDialog
-                  title={meeting.title}
-                  disabled={recording || busy || uploading || generating}
-                  onDelete={async () => {
-                    await saveQueue.current;
-                    await deleteMeeting(meeting.id);
-                    const remaining = meetings.filter((item) => item.id !== meeting.id);
-                    setMeetings(remaining);
-                    setSelected(remaining[0]?.id ?? null);
-                  }}
-                />
-                <span className="status">
-                  ●{' '}
+                <span
+                  className={`status ${
+                    recording ? (paused ? 'paused' : 'live') : busy ? 'busy' : 'ready'
+                  }`}
+                >
+                  <i aria-hidden="true" />
                   {recording
-                    ? `${paused ? '已暫停' : '錄音中'} ${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}`
+                    ? `${paused ? '已暫停' : '錄音中'} ${formattedElapsed}`
                     : busy
                       ? '處理中'
                       : '準備就緒'}
                 </span>
+                <DeleteMeetingDialog
+                  title={meeting.title}
+                  disabled={workspaceLocked}
+                  onDelete={async () => {
+                    translationQueueRef.current?.cancel();
+                    await flushPendingSaves();
+                    await deleteMeeting(meeting.id);
+                    const nextSelected =
+                      meetingsRef.current.find((item) => item.id !== meeting.id)?.id ?? null;
+                    setMeetings((old) => old.filter((item) => item.id !== meeting.id));
+                    if (selectedRef.current === meeting.id) setSelected(nextSelected);
+                  }}
+                />
               </div>
             </div>
-            <div className="content-grid">
-              <section className="main-column">
-                <div className="card recording-card">
-                  <div className="card-top">
-                    <div>
-                      <div className="eyebrow">CAPTURE THE CONVERSATION</div>
-                      <h2>準備好開始了嗎？</h2>
-                      <p>記錄每一個值得留下的想法。</p>
-                    </div>
-                    <div className="wave" aria-hidden="true">
-                      ▂▅▃▇▅▂▆▃
-                    </div>
-                  </div>
-                  <div className="record-controls">
-                    <div>
-                      <label htmlFor="mode">會議模式</label>
-                      <select
-                        id="mode"
-                        value={meeting.mode}
-                        disabled={recording || busy || uploading || generating}
-                        onChange={(e) => update({ mode: e.target.value })}
-                      >
-                        <option>一般會議</option>
-                        <option>雙語會議</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label htmlFor="source">音訊來源</label>
-                      <select
-                        id="source"
-                        disabled={recording || busy || uploading || generating}
-                        value={source}
-                        onChange={(e) => setSource(e.target.value as 'mic' | 'both')}
-                      >
-                        <option value="mic">麥克風</option>
-                        <option value="both">麥克風 + 分頁音訊</option>
-                      </select>
-                    </div>
-                    {recording && (
-                      <button className="pause" disabled={busy} onClick={() => void togglePause()}>
-                        {paused ? '繼續' : '暫停'}
-                      </button>
-                    )}
+
+            <section className="card capture-card" aria-label="錄音與即時轉錄控制">
+              <div className="capture-header">
+                <div className="capture-title-block">
+                  <div className="eyebrow">CAPTURE STUDIO</div>
+                  <h2>即時收音與同步轉錄</h2>
+                  <p>
+                    {recording
+                      ? paused
+                        ? '錄音已暫停，可隨時繼續或結束保存。'
+                        : '音訊每 5 秒分段保存於本機瀏覽器。'
+                      : '選擇會議模式、音訊來源與語言後即可開始錄音。'}
+                  </p>
+                </div>
+
+                <div className="capture-actions">
+                  <LiveWaveBars active={recording && !paused} subscribeLevels={subscribeLevels} />
+                  {recording && (
                     <button
-                      disabled={busy || uploading}
-                      className={recording ? 'record stop' : 'record'}
-                      onClick={recording ? stop : start}
+                      type="button"
+                      className="pause"
+                      disabled={busy}
+                      onClick={() => void togglePause()}
                     >
-                      {recording ? '■　停止錄音' : '●　開始錄音'}
+                      <IconPause size={14} />
+                      <span>{paused ? '繼續' : '暫停'}</span>
                     </button>
-                  </div>
-                  <label className="live-toggle">
-                    <input
-                      type="checkbox"
-                      checked={liveEnabled}
-                      disabled={recording || busy || uploading || generating}
-                      onChange={(e) => setLiveEnabled(e.target.checked)}
-                    />{' '}
-                    啟用即時轉錄
-                  </label>
-                  <div className="language-controls">
-                    <label>
-                      {meeting.mode === '雙語會議' ? '語言一' : '逐字稿語言'}
-                      <select
-                        value={meeting.sourceLang || '繁體中文'}
-                        disabled={recording || busy || uploading || generating}
-                        onChange={(e) => update({ sourceLang: e.target.value })}
+                  )}
+                  <button
+                    type="button"
+                    disabled={busy || (!recording && (uploading || generating))}
+                    className={recording ? 'record stop' : 'record'}
+                    onClick={recording ? stop : start}
+                  >
+                    {recording ? <IconStop size={15} /> : <IconMic size={16} />}
+                    <span>{recording ? '停止錄音' : '開始錄音'}</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="capture-controls">
+                <div className="control-block mode-block">
+                  <span className="field-caption">會議模式</span>
+                  <div className="segmented-control" role="group" aria-label="會議模式">
+                    {(['一般會議', '雙語會議'] as const).map((modeOption) => (
+                      <button
+                        key={modeOption}
+                        type="button"
+                        className={meeting.mode === modeOption ? 'active' : ''}
+                        disabled={workspaceLocked}
+                        aria-pressed={meeting.mode === modeOption}
+                        onClick={() => changeMode(modeOption)}
                       >
-                        {languages.map((language) => (
-                          <option key={language.code}>{language.label}</option>
-                        ))}
-                      </select>
-                    </label>
-                    {meeting.mode === '雙語會議' && (
-                      <label>
-                        語言二
+                        {modeOption}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <label className="control-block source-block">
+                  <span>音訊來源</span>
+                  <select
+                    id="source"
+                    disabled={workspaceLocked}
+                    value={source}
+                    onChange={(e) => setSource(e.target.value as 'mic' | 'both')}
+                  >
+                    <option value="mic">僅麥克風</option>
+                    <option value="both">麥克風 + 分頁音訊</option>
+                  </select>
+                </label>
+
+                <div className="language-pair">
+                  <label className="control-block">
+                    <span>{meeting.mode === '雙語會議' ? '語言一' : '逐字稿語言'}</span>
+                    <select
+                      value={meeting.sourceLang || '繁體中文'}
+                      disabled={workspaceLocked}
+                      onChange={(e) => update({ sourceLang: e.target.value }, true)}
+                    >
+                      {languages.map((language) => (
+                        <option key={language.code}>{language.label}</option>
+                      ))}
+                    </select>
+                  </label>
+
+                  {meeting.mode === '雙語會議' && (
+                    <>
+                      <button
+                        type="button"
+                        className="icon-button swap-button"
+                        aria-label="交換語言一與語言二"
+                        disabled={workspaceLocked}
+                        onClick={swapLanguages}
+                      >
+                        <IconSwap size={15} />
+                      </button>
+                      <label className="control-block">
+                        <span>語言二</span>
                         <select
                           value={meeting.targetLang || 'English'}
-                          disabled={recording || busy || uploading || generating}
-                          onChange={(e) => update({ targetLang: e.target.value })}
+                          disabled={workspaceLocked}
+                          onChange={(e) => update({ targetLang: e.target.value }, true)}
                         >
                           {languages.map((language) => (
                             <option key={language.code}>{language.label}</option>
                           ))}
                         </select>
                       </label>
-                    )}
-                    {meeting.mode === '雙語會議' && (
-                      <ProjectionOverlay
-                        segments={segments}
-                        interim={Object.values(interims)
-                          .map((item) => item.text)
-                          .filter(Boolean)
-                          .join(' ')}
-                      />
-                    )}
-                  </div>
-                  {recording && liveEnabled && (
-                    <div className="levels">
-                      <label>
-                        麥克風音量 <meter min="0" max="0.2" value={levels.mic} />
-                      </label>
-                      {source === 'both' && (
-                        <label>
-                          分頁音量 <meter min="0" max="0.2" value={levels.system} />
-                        </label>
-                      )}
-                    </div>
+                    </>
                   )}
-                  {liveStatus && (
-                    <p className="hint" role="status">
-                      {liveStatus}
-                    </p>
+                </div>
+
+                <div className="capture-utilities">
+                  <label className="live-toggle">
+                    <input
+                      type="checkbox"
+                      checked={liveEnabled}
+                      disabled={workspaceLocked}
+                      onChange={(e) => setLiveEnabled(e.target.checked)}
+                    />
+                    <span>啟用即時轉錄</span>
+                  </label>
+                  {meeting.mode === '雙語會議' && (
+                    <ProjectionOverlay
+                      segments={segments}
+                      interim={Object.values(interims)
+                        .map((item) => item.text)
+                        .filter(Boolean)
+                        .join(' ')}
+                    />
                   )}
-                  {translationStatus && (
-                    <p className="error" role="alert">
-                      {translationStatus}
-                    </p>
-                  )}
-                  {error && (
-                    <p className="error" role="alert">
-                      {error}
-                    </p>
-                  )}
+                </div>
+              </div>
+
+              <AudioMeters
+                active={recording && liveEnabled}
+                both={source === 'both'}
+                subscribeLevels={subscribeLevels}
+              />
+
+              {liveStatus && (
+                <p className="hint status-feedback" role="status">
+                  {liveStatus}
+                </p>
+              )}
+              {translationStatus && (
+                <p className="error" role="alert">
+                  <IconAlertCircle size={15} />
+                  <span>{translationStatus}</span>
+                </p>
+              )}
+              {error && (
+                <p className="error" role="alert">
+                  <IconAlertCircle size={15} />
+                  <span>{error}</span>
+                </p>
+              )}
+
+              {recordings.length > 0 && (
+                <div className="recordings-list">
                   {recordings.map((item) => (
                     <RecordingPlayer key={item.id} recording={item} />
                   ))}
                 </div>
-                <div className="section-head">
-                  <div>
-                    <div className="eyebrow">MEETING NOTES</div>
-                    <h2>會議筆記</h2>
-                  </div>
-                  <span>自動儲存於本機</span>
-                </div>
-                <div className="notes-card">
-                  <div className="notes-toolbar">
-                    <span>✎</span>　自由記錄{' '}
-                    <span className="toolbar-hint">隨時補充想法與重點</span>
-                  </div>
-                  <textarea
-                    value={meeting.notes}
-                    onChange={(e) => update({ notes: e.target.value })}
-                    placeholder="在這裡寫下會議重點、想法或待辦事項…"
-                    aria-label="會議筆記"
-                  />
-                </div>
+              )}
+            </section>
+
+            <div className="workspace-columns">
+              <div className="main-column">
                 <TranscriptFeed
                   key={`transcript-${meeting.id}`}
                   meetingId={meeting.id}
-                  languageHints={[
-                    languageCode(meeting.sourceLang || '繁體中文'),
-                    ...(meeting.mode === '雙語會議'
-                      ? [languageCode(meeting.targetLang || 'English')]
-                      : []),
-                  ].filter((value): value is string => Boolean(value))}
+                  meetingTitle={meeting.title}
+                  isBilingual={meeting.mode === '雙語會議'}
+                  languageHints={languageHints}
                   segments={segments}
-                  onAppend={(segment) => {
-                    if (selectedRef.current === meeting.id) setSegments((old) => [...old, segment]);
-                  }}
-                  onTextChange={(id, text) =>
-                    setSegments((old) =>
-                      old.map((item) => (item.id === id ? { ...item, text } : item)),
-                    )
-                  }
-                  onRecordingSaved={() => {
-                    void listRecordings(meeting.id)
-                      .then((items) => {
-                        if (selectedRef.current === meeting.id) setRecordings(items);
-                      })
-                      .catch(() => setError('無法讀取錄音。'));
-                  }}
+                  interims={interims}
+                  onAppend={handleAppendSegment}
+                  onTextChange={handleSegmentTextChange}
+                  onRecordingSaved={handleRecordingSaved}
                   onBusyChange={setUploading}
-                  onSeek={(id, seconds) => {
-                    const audio = document.getElementById(`audio-${id}`) as HTMLAudioElement | null;
-                    if (audio) {
-                      audio.currentTime = seconds;
-                      audio.scrollIntoView({ block: 'center' });
-                      void audio.play().catch(() => setError('無法播放錄音，請使用錄音播放器。'));
-                    }
-                  }}
+                  onSeek={handleSeekRecording}
                   settings={settings}
                   locked={recording || busy}
                 />
-                {Object.entries(interims)
-                  .filter(([, item]) => item.text)
-                  .map(([id, item]) => (
-                    <p className="interim" key={id}>
-                      {item.track === 'mic' ? '我方' : '對方'}：{item.text}{' '}
-                      <small>（辨識中）</small>
-                    </p>
-                  ))}
-                <MinutesStudio
-                  key={`minutes-${meeting.id}`}
-                  meetingId={meeting.id}
-                  meetingLanguages={
-                    meeting.mode === '雙語會議'
-                      ? [meeting.sourceLang || '繁體中文', meeting.targetLang || 'English']
-                      : [meeting.sourceLang || '繁體中文']
-                  }
-                  text={[
-                    meeting.notes,
-                    ...segments.map((segment) =>
-                      segment.translation
-                        ? `${segment.speakerLabel}: ${segment.text}\n譯文: ${segment.translation}`
-                        : `${segment.speakerLabel}: ${segment.text}`,
-                    ),
-                  ]
-                    .filter(Boolean)
-                    .join('\n\n')}
-                  settings={settings}
-                  onBusyChange={setGenerating}
-                />
-              </section>
-              <aside className="right-column">
-                <div className="card guide">
-                  <div className="guide-icon">✦</div>
-                  <h3>讓對話更有收穫</h3>
-                  <p>從一場會議開始，將重要的想法留在這裡。</p>
-                  <div className="steps">
-                    <div>
-                      <span>1</span>
-                      <p>
-                        <strong>設定會議</strong>
-                        <small>選擇模式並確認麥克風</small>
-                      </p>
-                    </div>
-                    <div>
-                      <span>2</span>
-                      <p>
-                        <strong>開始記錄</strong>
-                        <small>錄音並隨手記下重要想法</small>
-                      </p>
-                    </div>
-                    <div>
-                      <span>3</span>
-                      <p>
-                        <strong>整理與回顧</strong>
-                        <small>下載錄音，稍後繼續編輯筆記</small>
-                      </p>
-                    </div>
+              </div>
+
+              <aside className="studio-column" aria-label="筆記與會議紀錄工作區">
+                <div className="studio-tabs-header">
+                  <div className="segmented-control studio-tabs" role="tablist">
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={studioTab === 'notes'}
+                      className={studioTab === 'notes' ? 'active' : ''}
+                      onClick={() => setStudioTab('notes')}
+                    >
+                      <IconFileText size={15} />
+                      <span>會議筆記</span>
+                      {meeting.notes.length > 0 && (
+                        <span className="tab-badge">{meeting.notes.length} 字</span>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={studioTab === 'minutes'}
+                      className={studioTab === 'minutes' ? 'active' : ''}
+                      onClick={() => setStudioTab('minutes')}
+                    >
+                      <IconSparkles size={15} />
+                      <span>AI 紀錄</span>
+                      {generating ? (
+                        <span className="pulse-dot" aria-label="生成中" />
+                      ) : minutesCount > 0 ? (
+                        <span className="tab-badge">{minutesCount}</span>
+                      ) : null}
+                    </button>
                   </div>
                 </div>
-                <div className="coming">
-                  <span>✧</span>
-                  <div>
-                    <strong>雙語對話</strong>
-                    <p>選擇雙語會議，即可在逐字稿旁顯示翻譯並開啟投影字幕。</p>
+
+                <div className="card studio-panel" hidden={studioTab !== 'notes'}>
+                  <div className="notes-toolbar">
+                    <span>自由記錄</span>
+                    <span className="toolbar-hint">自動儲存於本機</span>
                   </div>
+                  <textarea
+                    className="notes-textarea"
+                    value={meeting.notes}
+                    onChange={(e) => update({ notes: e.target.value })}
+                    placeholder="在這裡寫下會議重點、想法、關鍵決策或待辦事項…"
+                    aria-label="會議筆記"
+                  />
+                </div>
+
+                <div className="card studio-panel" hidden={studioTab !== 'minutes'}>
+                  <MinutesStudio
+                    key={`minutes-${meeting.id}`}
+                    meetingId={meeting.id}
+                    meetingTitle={meeting.title}
+                    meetingLanguages={meetingLanguages}
+                    text={minutesText}
+                    settings={settings}
+                    onBusyChange={setGenerating}
+                    onRecordsCountChange={setMinutesCount}
+                  />
                 </div>
               </aside>
             </div>
+
             <footer>
-              PolyMeet <span>·</span> 為更好的每一次對話而設計
+              <span>PolyMeet</span>
+              <span aria-hidden="true">·</span>
+              <span>本機優先會議工作區</span>
             </footer>
           </div>
         ) : (
           <div className="empty">
-            <div className="empty-icon select-none">✳</div>
+            <div className="empty-icon" aria-hidden="true">
+              <IconBrandMark size={30} />
+            </div>
             <div className="eyebrow">WELCOME TO POLYMEET</div>
             <h1>
               讓每場對話
               <br />
               都有跡可循。
             </h1>
-            <p>一個安靜、有條理的空間，陪你記錄會議中的每個重要時刻。</p>
-            <button className="record" onClick={create}>
-              ＋　建立第一場會議
+            <p>整合即時逐字稿、雙語口譯字幕與 AI 會議紀要，資料全程保存在你的瀏覽器中。</p>
+            <div className="empty-capabilities">
+              <span>雙軌即時轉錄</span>
+              <span>雙語同步投影字幕</span>
+              <span>本機優先防遺失</span>
+            </div>
+            <button type="button" className="record empty-cta" onClick={create}>
+              <IconPlus size={16} />
+              <span>建立第一場會議</span>
             </button>
-            <div className="empty-note">你的筆記會保存在此瀏覽器中</div>
           </div>
         )}
       </main>

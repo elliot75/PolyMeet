@@ -17,6 +17,7 @@ export class LiveCapture {
     const targetRate = options.provider === 'openai' ? 24000 : 16000;
     const context = new AudioContext();
     this.context = context;
+    if (context.state === 'suspended') await context.resume();
     await context.audioWorklet.addModule('/audio-worklet.js');
     for (const track of tracks) {
       const client = new LiveSttClient(

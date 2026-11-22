@@ -8,15 +8,19 @@ export async function* generateText(
   model: string,
   instruction: string,
   input: string,
+  signal?: AbortSignal,
 ): AsyncGenerator<string> {
   if (provider === 'openai') {
     const client = new OpenAI({ apiKey: key });
-    const stream = await client.responses.create({
-      model,
-      instructions: instruction,
-      input,
-      stream: true,
-    });
+    const stream = await client.responses.create(
+      {
+        model,
+        instructions: instruction,
+        input,
+        stream: true,
+      },
+      { signal },
+    );
     for await (const event of stream)
       if (event.type === 'response.output_text.delta') yield event.delta;
   } else {
@@ -24,7 +28,7 @@ export async function* generateText(
     const stream = await client.models.generateContentStream({
       model,
       contents: input,
-      config: { systemInstruction: instruction },
+      config: { systemInstruction: instruction, abortSignal: signal },
     });
     for await (const chunk of stream) if (chunk.text) yield chunk.text;
   }

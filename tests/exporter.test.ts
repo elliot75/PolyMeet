@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildMinutesExport } from '../src/client/services/exporter';
+import { buildMinutesExport, buildTranscriptExport } from '../src/client/services/exporter';
 
 const metadata = {
   id: 'version-1',
@@ -28,6 +28,30 @@ describe('minutes export', () => {
     expect(file.filename).toBe('minutes.json');
     expect(file.mimeType).toBe('application/json');
     expect(JSON.parse(file.content)).toEqual({ ...metadata, markdownContent: '已修改' });
+  });
+  it('sanitizes custom filename prefixes and formats bilingual transcripts', () => {
+    expect(buildMinutesExport('md', 'x', metadata, 'Q4 / 專案:討論').filename).toBe(
+      'Q4-專案-討論-minutes.md',
+    );
+    const segments = [
+      {
+        id: '1',
+        meetingId: 'm1',
+        track: 'mic' as const,
+        speakerLabel: '我方',
+        startedAtMs: 65000,
+        text: '早安',
+        translation: 'Good morning',
+        isFinal: true,
+      },
+    ];
+    const md = buildTranscriptExport('md', segments, '週會');
+    expect(md.filename).toBe('週會-transcript.md');
+    expect(md.content).toContain('### [1:05] 我方');
+    expect(md.content).toContain('> Good morning');
+    const txt = buildTranscriptExport('txt', segments, '週會');
+    expect(txt.content).toContain('[1:05] 我方: 早安');
+    expect(txt.content).toContain('譯文: Good morning');
   });
 });
 

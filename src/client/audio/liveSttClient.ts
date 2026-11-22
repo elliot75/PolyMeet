@@ -30,7 +30,12 @@ export class LiveSttClient {
     this.socket = socket;
     socket.onopen = () => socket.send(JSON.stringify(this.start));
     socket.onmessage = (message) => {
-      const event = JSON.parse(message.data) as SttServerEvent;
+      let event: SttServerEvent;
+      try {
+        event = JSON.parse(message.data) as SttServerEvent;
+      } catch {
+        return;
+      }
       if (event.type === 'session.ready') {
         this.ready = true;
         this.retry = 0;
@@ -116,9 +121,12 @@ export class LiveSttClient {
   audio(buffer: ArrayBuffer) {
     if (this.stopped) return;
     const bytes = new Uint8Array(buffer);
-    let binary = '';
-    for (const byte of bytes) binary += String.fromCharCode(byte);
-    this.queue.push({ type: 'audio.chunk', pcm16Base64: btoa(binary) });
+    const CHUNK = 0x8000;
+    const parts: string[] = [];
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      parts.push(String.fromCharCode(...bytes.subarray(i, i + CHUNK)));
+    }
+    this.queue.push({ type: 'audio.chunk', pcm16Base64: btoa(parts.join('')) });
     if (this.queue.length > MAX_BUFFERED_PACKETS) {
       this.queue.shift();
       this.reportBufferLoss();

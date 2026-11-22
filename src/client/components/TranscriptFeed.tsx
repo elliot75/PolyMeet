@@ -1,13 +1,28 @@
-import { useRef, useState, type DragEvent, type PointerEvent } from 'react';
+import { memo, useEffect, useRef, useState, type DragEvent, type HTMLAttributes } from 'react';
 import { splitAudio } from '../audio/audioChunker';
-import { saveAudioChunk, saveRecording, saveSegment, updateSegmentText } from '../db/meetingDb';
+import { saveSegment, saveUploadedRecording, updateSegmentText } from '../db/meetingDb';
+import { downloadTranscript, formatTimestamp } from '../services/exporter';
 import { headers, type Settings } from '../services/settings';
-import type { TranscriptSegment } from '../../shared/types';
+import type { AudioTrackRole, TranscriptSegment } from '../../shared/types';
+import { closeDialogAnimated, isPointerOutsideDialog, openDialogModal } from '../utils/dialog';
+import {
+  IconAlertCircle,
+  IconDownload,
+  IconFileText,
+  IconMessageSquare,
+  IconPlay,
+  IconSearch,
+  IconUpload,
+  IconX,
+} from './Icons';
 
 interface Props {
   meetingId: string;
+  meetingTitle: string;
+  isBilingual: boolean;
   languageHints: string[];
   segments: TranscriptSegment[];
+  interims: Record<string, { track: AudioTrackRole; text: string }>;
   onAppend: (segment: TranscriptSegment) => void;
   onTextChange: (id: string, text: string) => void;
   onRecordingSaved: () => void;
@@ -16,6 +31,7 @@ interface Props {
   settings: Settings;
   locked?: boolean;
 }
+
 const audioTypes: Record<string, string> = {
   wav: 'audio/wav',
   mp3: 'audio/mpeg',
@@ -26,6 +42,7 @@ const audioTypes: Record<string, string> = {
   flac: 'audio/flac',
   aac: 'audio/aac',
 };
+
 function normalizeAudio(file: File): File {
   const mime = file.type || audioTypes[file.name.split('.').pop()?.toLowerCase() || ''];
   if (!mime?.startsWith('audio/')) throw new Error('請選擇可支援的音訊檔案。');
@@ -33,10 +50,14 @@ function normalizeAudio(file: File): File {
     ? file
     : new File([file], file.name, { type: mime, lastModified: file.lastModified });
 }
-export function TranscriptFeed({
+
+export const TranscriptFeed = memo(function TranscriptFeed({
   meetingId,
+  meetingTitle,
+  isBilingual,
   languageHints,
   segments,
+  interims,
   onAppend,
   onTextChange,
   onRecordingSaved,
@@ -50,47 +71,45 @@ export function TranscriptFeed({
   const [progress, setProgress] = useState('');
   const [completed, setCompleted] = useState<number | undefined>();
   const [total, setTotal] = useState<number | undefined>();
-  const [error, setError] = useState('');
+  const [uploadError, setUploadError] = useState('');
+  const [editError, setEditError] = useState('');
   const [dragging, setDragging] = useState(false);
+  const [filterQuery, setFilterQuery] = useState('');
   const dialog = useRef<HTMLDialogElement>(null);
   const input = useRef<HTMLInputElement>(null);
   const abort = useRef<AbortController | null>(null);
   const writes = useRef<Promise<void>>(Promise.resolve());
   const pressedOutside = useRef(false);
+
+  useEffect(() => () => abort.current?.abort(), []);
+
   function choose(next: File | undefined) {
     if (!next || busy) return;
     try {
       setFile(normalizeAudio(next));
-      setError('');
+      setUploadError('');
       setProgress('');
       setCompleted(undefined);
       setTotal(undefined);
     } catch (e) {
       setFile(null);
-      setError(e instanceof Error ? e.message : '無法讀取音檔。');
+      setUploadError(e instanceof Error ? e.message : '無法讀取音檔。');
     }
   }
+
   function drop(event: DragEvent<HTMLElement>) {
     event.preventDefault();
     setDragging(false);
     choose(event.dataTransfer.files[0]);
   }
-  function outside(event: PointerEvent<HTMLDialogElement>) {
-    const rect = event.currentTarget.getBoundingClientRect();
-    return (
-      event.clientX < rect.left ||
-      event.clientX > rect.right ||
-      event.clientY < rect.top ||
-      event.clientY > rect.bottom
-    );
-  }
+
   async function upload() {
     if (!file || busy) return;
     const controller = new AbortController();
     abort.current = controller;
     setBusy(true);
     onBusyChange(true);
-    setError('');
+    setUploadError('');
     setProgress('正在保存及準備音檔…');
     setCompleted(undefined);
     setTotal(undefined);
@@ -103,9 +122,7 @@ export function TranscriptFeed({
       completed: false,
     };
     try {
-      await saveRecording(recording);
-      await saveAudioChunk(recording.id, 0, file);
-      await saveRecording({ ...recording, completed: true });
+      await saveUploadedRecording({ ...recording, completed: true }, file);
       onRecordingSaved();
       if (controller.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
       for await (const part of splitAudio(file)) {
@@ -139,6 +156,7 @@ export function TranscriptFeed({
           );
         }
         const result = await response.json();
+        if (controller.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
         const items: { text: string; startSeconds: number; endSeconds?: number }[] = Array.isArray(
           result.segments,
         )
@@ -147,6 +165,7 @@ export function TranscriptFeed({
             ? [{ text: result.text.trim(), startSeconds: 0 }]
             : [];
         for (const item of items) {
+          if (controller.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
           const segment: TranscriptSegment = {
             id: crypto.randomUUID(),
             meetingId,
@@ -164,7 +183,7 @@ export function TranscriptFeed({
           onAppend(segment);
         }
         if (result.cleanupWarning)
-          setError('轉錄完成，但無法刪除 Google 暫存檔，請至供應商管理介面檢查。');
+          setUploadError('轉錄完成，但無法刪除 Google 暫存檔，請至供應商管理介面檢查。');
         setCompleted(part.index);
       }
       setProgress('轉錄完成，音檔與逐字稿已保存。');
@@ -172,7 +191,7 @@ export function TranscriptFeed({
     } catch (e) {
       if (controller.signal.aborted) setProgress('已停止轉錄，已保存的音檔與片段可繼續使用。');
       else {
-        setError(e instanceof Error ? e.message : '無法處理此音檔。');
+        setUploadError(e instanceof Error ? e.message : '無法處理此音檔。');
         setProgress('已完成的片段會保留。');
       }
     } finally {
@@ -182,55 +201,106 @@ export function TranscriptFeed({
       if (input.current) input.current.value = '';
     }
   }
+
   function edit(segment: TranscriptSegment, text: string) {
+    setEditError('');
     onTextChange(segment.id, text);
     writes.current = writes.current
       .catch(() => {})
       .then(() => updateSegmentText(segment.id, text))
       .catch(() => {
-        setError('無法保存逐字稿修改。');
+        setEditError('無法保存逐字稿修改，請檢查瀏覽器儲存空間。');
       });
   }
+
+  const normalizedFilter = filterQuery.trim().toLowerCase();
+  const visibleSegments = normalizedFilter
+    ? segments.filter(
+        (segment) =>
+          segment.text.toLowerCase().includes(normalizedFilter) ||
+          (segment.translation?.toLowerCase().includes(normalizedFilter) ?? false) ||
+          segment.speakerLabel.toLowerCase().includes(normalizedFilter),
+      )
+    : segments;
+  const activeInterims = Object.entries(interims).filter(([, item]) => item.text.trim());
+  const progressPercent =
+    total && completed !== undefined ? Math.min(100, Math.round((completed / total) * 100)) : null;
+
   return (
-    <section>
+    <section className="transcript-section">
       <div className="section-head">
-        <div>
-          <div className="eyebrow">TRANSCRIPT</div>
-          <h2>逐字稿</h2>
+        <div className="section-title-group">
+          <div className="eyebrow">TRANSCRIPT FEED</div>
+          <div className="section-title-row">
+            <h2>逐字稿</h2>
+            <span className="pill-count">{segments.length} 段</span>
+            {isBilingual && <span className="pill-tag">雙語同步</span>}
+          </div>
         </div>
-        <button
-          className="secondary"
-          disabled={busy || locked}
-          onClick={() => {
-            setError('');
-            dialog.current?.showModal();
-          }}
-        >
-          上傳音檔轉錄
-        </button>
+        <div className="section-actions">
+          {segments.length > 0 && (
+            <>
+              <button
+                type="button"
+                className="secondary small-button"
+                onClick={() => downloadTranscript('md', segments, meetingTitle)}
+              >
+                <IconDownload size={14} />
+                <span>.md</span>
+              </button>
+              <button
+                type="button"
+                className="secondary small-button"
+                onClick={() => downloadTranscript('txt', segments, meetingTitle)}
+              >
+                <IconDownload size={14} />
+                <span>.txt</span>
+              </button>
+            </>
+          )}
+          <button
+            type="button"
+            className="secondary small-button"
+            disabled={busy || locked}
+            onClick={() => {
+              setUploadError('');
+              openDialogModal(dialog.current);
+            }}
+          >
+            <IconUpload size={14} />
+            <span>上傳音檔</span>
+          </button>
+        </div>
       </div>
+
       <dialog
         ref={dialog}
+        className="upload-dialog"
         aria-labelledby="upload-title"
-        {...({ closedby: busy ? 'none' : 'any' } as React.HTMLAttributes<HTMLDialogElement>)}
+        {...({ closedby: busy ? 'none' : 'any' } as HTMLAttributes<HTMLDialogElement>)}
         onCancel={(event) => {
+          event.preventDefault();
           if (busy) {
-            event.preventDefault();
             abort.current?.abort();
+          } else {
+            void closeDialogAnimated(dialog.current);
           }
         }}
         onPointerDown={(event) => {
-          if (!busy && !('closedBy' in HTMLDialogElement.prototype))
-            pressedOutside.current = outside(event);
+          if (!busy && !('closedBy' in HTMLDialogElement.prototype) && dialog.current) {
+            pressedOutside.current = isPointerOutsideDialog(event, dialog.current);
+          }
         }}
         onPointerUp={(event) => {
           if (
             !busy &&
             !('closedBy' in HTMLDialogElement.prototype) &&
             pressedOutside.current &&
-            outside(event)
-          )
-            dialog.current?.close();
+            dialog.current &&
+            isPointerOutsideDialog(event, dialog.current)
+          ) {
+            void closeDialogAnimated(dialog.current);
+          }
           pressedOutside.current = false;
         }}
         onClose={() => {
@@ -247,14 +317,16 @@ export function TranscriptFeed({
             className="close"
             aria-label="關閉上傳視窗"
             disabled={busy}
-            onClick={() => dialog.current?.close()}
+            onClick={() => void closeDialogAnimated(dialog.current)}
           >
-            ×
+            <IconX size={18} />
           </button>
         </div>
-        <p className="hint">音檔會先保存在此瀏覽器，再傳送至選定的轉錄服務。大型音檔會自動分段。</p>
+        <p className="hint">
+          音檔會先保存於此瀏覽器，再傳送至選定的轉錄服務。超過 23 MiB 的音檔將自動切分處理。
+        </p>
         <div
-          className={`drop-zone ${dragging ? 'dragging' : ''}`}
+          className={`drop-zone ${dragging ? 'dragging' : ''} ${file ? 'has-file' : ''}`}
           onDragOver={(event) => {
             event.preventDefault();
             if (!busy) setDragging(true);
@@ -262,18 +334,42 @@ export function TranscriptFeed({
           onDragLeave={() => setDragging(false)}
           onDrop={drop}
         >
-          <span aria-hidden="true">♫</span>
-          <strong>{file ? file.name : '將音檔拖放至此'}</strong>
-          <small>
-            {file ? `${(file.size / 1024 / 1024).toFixed(1)} MB` : '或選擇瀏覽器支援的音訊檔案'}
-          </small>
+          <div className="drop-icon" aria-hidden="true">
+            <IconFileText size={22} />
+          </div>
+          {file ? (
+            <div className="selected-file-card">
+              <div>
+                <strong>{file.name}</strong>
+                <small>{(file.size / 1024 / 1024).toFixed(1)} MB · 已準備轉錄</small>
+              </div>
+              {!busy && (
+                <button
+                  type="button"
+                  className="icon-button"
+                  aria-label="移除已選音檔"
+                  onClick={() => {
+                    setFile(null);
+                    if (input.current) input.current.value = '';
+                  }}
+                >
+                  <IconX size={15} />
+                </button>
+              )}
+            </div>
+          ) : (
+            <>
+              <strong>將音檔拖放至此處</strong>
+              <small>支援 WAV、MP3、M4A、WebM、OGG、FLAC、AAC</small>
+            </>
+          )}
           <button
             type="button"
             className="secondary"
             disabled={busy}
             onClick={() => input.current?.click()}
           >
-            選擇音檔
+            {file ? '更換音檔' : '選擇音檔'}
           </button>
           <input
             ref={input}
@@ -283,20 +379,29 @@ export function TranscriptFeed({
             onChange={(event) => choose(event.target.files?.[0])}
           />
         </div>
-        {busy && <progress aria-label="音檔轉錄進度" max={total} value={completed} />}
+        {busy && (
+          <div className="progress-block">
+            <progress aria-label="音檔轉錄進度" max={total} value={completed} />
+            {progressPercent !== null && (
+              <span className="progress-percent">{progressPercent}%</span>
+            )}
+          </div>
+        )}
         {progress && (
-          <p className="hint" role="status">
+          <p className="hint status-feedback" role="status">
             {progress}
           </p>
         )}
-        {error && (
+        {uploadError && (
           <p className="error" role="alert">
-            {error}
+            <IconAlertCircle size={15} />
+            <span>{uploadError}</span>
           </p>
         )}
         <div className="dialog-actions">
           {busy ? (
             <button
+              type="button"
               className="secondary"
               onClick={() => {
                 abort.current?.abort();
@@ -307,47 +412,144 @@ export function TranscriptFeed({
             </button>
           ) : (
             <>
-              <button className="secondary" onClick={() => dialog.current?.close()}>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => void closeDialogAnimated(dialog.current)}
+              >
                 關閉
               </button>
-              <button className="record" disabled={!file} onClick={() => void upload()}>
+              <button
+                type="button"
+                className="record"
+                disabled={!file}
+                onClick={() => void upload()}
+              >
                 開始轉錄
               </button>
             </>
           )}
         </div>
       </dialog>
+
       <div className="card transcript-card">
-        <p className="hint">逐字稿保存在此瀏覽器，並可用於生成會議紀錄。</p>
-        {segments.length ? (
-          segments.map((segment) => (
-            <div key={segment.id} className="segment">
-              <span className="segment-label">
-                {segment.speakerLabel} · {Math.floor(segment.startedAtMs / 60000)}:
-                {String(Math.floor(segment.startedAtMs / 1000) % 60).padStart(2, '0')}
-                {segment.timeIsChunkStart && '（片段起點）'}
-              </span>
-              {segment.recordingId && (
+        {editError && (
+          <p className="error transcript-inline-error" role="alert">
+            <IconAlertCircle size={15} />
+            <span>{editError}</span>
+          </p>
+        )}
+
+        {segments.length > 5 && (
+          <div className="transcript-filter-bar">
+            <label className="search compact-search">
+              <IconSearch size={14} />
+              <input
+                value={filterQuery}
+                onChange={(event) => setFilterQuery(event.target.value)}
+                placeholder="搜尋逐字稿或譯文…"
+                aria-label="搜尋逐字稿"
+              />
+              {filterQuery && (
                 <button
-                  className="seek"
-                  onClick={() => onSeek(segment.recordingId!, segment.startedAtMs / 1000)}
+                  type="button"
+                  className="search-clear"
+                  aria-label="清除搜尋"
+                  onClick={() => setFilterQuery('')}
                 >
-                  {segment.timeIsChunkStart ? '播放片段' : '播放此處'}
+                  <IconX size={13} />
                 </button>
               )}
-              <textarea
-                aria-label={`${segment.speakerLabel}逐字稿`}
-                disabled={busy || locked}
-                value={segment.text}
-                onChange={(event) => edit(segment, event.target.value)}
-              />
-              {segment.translation && <p className="translation">{segment.translation}</p>}
-            </div>
-          ))
+            </label>
+          </div>
+        )}
+
+        {visibleSegments.length > 0 || activeInterims.length > 0 ? (
+          <div className="segment-list">
+            {visibleSegments.map((segment) => (
+              <article key={segment.id} className="segment">
+                <div className="segment-meta">
+                  <span
+                    className={`segment-badge ${
+                      segment.track === 'mic'
+                        ? 'mic'
+                        : segment.track === 'system'
+                          ? 'system'
+                          : 'upload'
+                    }`}
+                  >
+                    {segment.speakerLabel}
+                  </span>
+                  {segment.recordingId ? (
+                    <button
+                      type="button"
+                      className="seek"
+                      aria-label={`從 ${formatTimestamp(segment.startedAtMs)} 播放錄音`}
+                      onClick={() => onSeek(segment.recordingId!, segment.startedAtMs / 1000)}
+                    >
+                      <IconPlay size={11} />
+                      <span>{formatTimestamp(segment.startedAtMs)}</span>
+                    </button>
+                  ) : (
+                    <span className="segment-time">{formatTimestamp(segment.startedAtMs)}</span>
+                  )}
+                  {segment.timeIsChunkStart && <span className="chunk-note">片段起點</span>}
+                </div>
+                <textarea
+                  className="segment-editor"
+                  aria-label={`${segment.speakerLabel}逐字稿`}
+                  disabled={busy || locked}
+                  value={segment.text}
+                  onChange={(event) => edit(segment, event.target.value)}
+                />
+                {segment.translation && <p className="translation">{segment.translation}</p>}
+              </article>
+            ))}
+
+            {activeInterims.map(([id, item]) => (
+              <article key={id} className="segment interim-segment" aria-live="polite">
+                <div className="segment-meta">
+                  <span className={`segment-badge ${item.track === 'mic' ? 'mic' : 'system'}`}>
+                    {item.track === 'mic' ? '我方' : '對方'}
+                  </span>
+                  <span className="interim-pill">
+                    <span className="pulse-dot" aria-hidden="true" />
+                    辨識中
+                  </span>
+                </div>
+                <p className="interim-text">{item.text}</p>
+              </article>
+            ))}
+          </div>
+        ) : normalizedFilter ? (
+          <div className="panel-empty">
+            <p>找不到符合「{filterQuery}」的逐字稿內容。</p>
+            <button type="button" className="secondary" onClick={() => setFilterQuery('')}>
+              顯示全部段落
+            </button>
+          </div>
         ) : (
-          <p className="hint">目前沒有逐字稿。</p>
+          <div className="panel-empty">
+            <div className="panel-empty-icon" aria-hidden="true">
+              <IconMessageSquare size={22} />
+            </div>
+            <h3>尚無逐字稿內容</h3>
+            <p>點擊上方「開始錄音」進行即時轉錄，或匯入既有音訊檔自動生成逐字稿。</p>
+            <button
+              type="button"
+              className="secondary"
+              disabled={busy || locked}
+              onClick={() => {
+                setUploadError('');
+                openDialogModal(dialog.current);
+              }}
+            >
+              <IconUpload size={15} />
+              <span>上傳音檔轉錄</span>
+            </button>
+          </div>
         )}
       </div>
     </section>
   );
-}
+});

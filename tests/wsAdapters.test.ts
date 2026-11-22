@@ -93,4 +93,44 @@ describe('transcription adapters', () => {
       })[0],
     ).toMatchObject({ text: '会社です' });
   });
+  it('clears failed OpenAI transcription items and bounds partial delta storage', () => {
+    const map = createEventMapper(openai);
+    map({
+      type: 'conversation.item.input_audio_transcription.delta',
+      item_id: 'failed-item',
+      delta: 'partial',
+    });
+    expect(
+      map({
+        type: 'conversation.item.input_audio_transcription.failed',
+        item_id: 'failed-item',
+      })[0],
+    ).toEqual({
+      type: 'transcript.final',
+      segmentId: 'failed-item',
+      text: '',
+      track: 'mic',
+    });
+    for (let i = 0; i < 201; i++) {
+      map({
+        type: 'conversation.item.input_audio_transcription.delta',
+        item_id: `item-${i}`,
+        delta: 'a',
+      });
+    }
+    expect(
+      map({
+        type: 'conversation.item.input_audio_transcription.delta',
+        item_id: 'item-0',
+        delta: 'b',
+      })[0],
+    ).toMatchObject({ type: 'transcript.interim', text: 'b' });
+    expect(
+      map({
+        type: 'conversation.item.input_audio_transcription.delta',
+        item_id: 'item-200',
+        delta: 'c',
+      })[0],
+    ).toMatchObject({ type: 'transcript.interim', text: 'ac' });
+  });
 });
