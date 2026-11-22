@@ -1,7 +1,9 @@
 import type { MinutesRecord, TranscriptSegment } from '../../shared/types';
 
 export type MinutesExportFormat = 'md' | 'txt' | 'json';
-export type TranscriptExportFormat = 'md' | 'txt';
+type SubtitleFormat = 'srt' | 'vtt';
+export type TranscriptExportFormat = 'md' | 'txt' | SubtitleFormat;
+type RecordingDuration = { id: string; durationSeconds?: number };
 export type MinutesExportMetadata = Pick<MinutesRecord, 'action' | 'targetLanguage' | 'style'> &
   Partial<Pick<MinutesRecord, 'id' | 'meetingId' | 'createdAt'>>;
 
@@ -15,13 +17,19 @@ function sanitizeFilename(name: string): string {
     .slice(0, 60);
 }
 
-function triggerDownload(filename: string, mimeType: string, content: string) {
-  const url = URL.createObjectURL(new Blob([content], { type: mimeType }));
+function downloadBlob(filename: string, blob: Blob) {
+  const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
   link.download = filename;
   link.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+export function downloadMeetingArchive(blob: Blob, title?: string) {
+  const name =
+    title === undefined ? 'polymeet-workspace' : sanitizeFilename(title) || 'polymeet-meeting';
+  downloadBlob(`${name}.polymeet`, blob);
 }
 
 export function formatTimestamp(ms: number): string {
@@ -57,15 +65,96 @@ export function downloadMinutes(
   filenamePrefix?: string,
 ) {
   const file = buildMinutesExport(format, markdownContent, metadata, filenamePrefix);
-  triggerDownload(file.filename, file.mimeType, file.content);
+  downloadBlob(file.filename, new Blob([file.content], { type: file.mimeType }));
+}
+
+export function formatSubtitleTimestamp(ms: number, format: SubtitleFormat): string {
+  const time = Math.max(0, Math.round(ms));
+  const hours = Math.floor(time / 3_600_000);
+  const minutes = Math.floor(time / 60_000) % 60;
+  const seconds = Math.floor(time / 1000) % 60;
+  const clock = [hours, minutes, seconds].map((part) => String(part).padStart(2, '0')).join(':');
+  return `${clock}${format === 'srt' ? ',' : '.'}${String(time % 1000).padStart(3, '0')}`;
+}
+
+function subtitleText(text: string): string {
+  return text
+    .split(/\r\n?|\n/)
+    .map((line) => line.replace(/\0/g, '').trim())
+    .filter(Boolean)
+    .join('\n');
+}
+
+function buildSubtitles(
+  format: SubtitleFormat,
+  segments: TranscriptSegment[],
+  recordings: RecordingDuration[],
+): string {
+  const groups = new Map<string | undefined, TranscriptSegment[]>();
+  for (const segment of segments) {
+    const group = groups.get(segment.recordingId);
+    if (group) group.push(segment);
+    else groups.set(segment.recordingId, [segment]);
+  }
+  const durations = new Map(recordings.map(({ id, durationSeconds }) => [id, durationSeconds]));
+  const cues: string[] = [];
+  let offset = 0;
+  for (const [recordingId, group] of groups) {
+    const sorted = group
+      .map((segment) => ({
+        start: Math.max(0, Math.round(segment.startedAtMs)),
+        end: Math.round(segment.endedAtMs ?? 0),
+        text: subtitleText(segment.text),
+        translation: subtitleText(segment.translation ?? ''),
+      }))
+      .filter((cue) => Number.isFinite(cue.start) && (cue.text || cue.translation))
+      .sort((a, b) => a.start - b.start);
+    let groupEnd = 0;
+    let next = 0;
+    for (const cue of sorted) {
+      while (next < sorted.length && sorted[next].start <= cue.start) next++;
+      const estimatedDuration = Math.min(
+        6000,
+        Math.max(1000, Array.from(cue.text || cue.translation).length * 70),
+      );
+      const end =
+        Number.isFinite(cue.end) && cue.end > cue.start
+          ? cue.end
+          : Math.min(cue.start + estimatedDuration, sorted[next]?.start ?? Infinity);
+      const timing = `${formatSubtitleTimestamp(offset + cue.start, format)} --> ${formatSubtitleTimestamp(offset + end, format)}`;
+      const content = [cue.text, cue.translation]
+        .filter(Boolean)
+        .join('\n')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+      cues.push(
+        format === 'srt' ? `${cues.length + 1}\n${timing}\n${content}` : `${timing}\n${content}`,
+      );
+      groupEnd = Math.max(groupEnd, end);
+    }
+    const duration = recordingId ? durations.get(recordingId) : undefined;
+    offset += Math.max(groupEnd, Math.round((duration ?? 0) * 1000));
+  }
+  const header = format === 'vtt' ? 'WEBVTT\n\n' : '';
+  return header + (cues.length ? `${cues.join('\n\n')}\n` : '');
 }
 
 export function buildTranscriptExport(
   format: TranscriptExportFormat,
   segments: TranscriptSegment[],
   title?: string,
+  recordings: RecordingDuration[] = [],
 ) {
   const safeTitle = title ? sanitizeFilename(title) : '';
+  const filename = safeTitle ? `${safeTitle}-transcript.${format}` : `transcript.${format}`;
+  if (format === 'srt' || format === 'vtt') {
+    return {
+      filename,
+      mimeType: format === 'vtt' ? 'text/vtt' : 'application/x-subrip',
+      content: buildSubtitles(format, segments, recordings),
+    };
+  }
   const heading = title?.trim() || 'PolyMeet 逐字稿';
   const lines = segments.map((segment) => {
     const stamp = formatTimestamp(segment.startedAtMs);
@@ -87,7 +176,7 @@ export function buildTranscriptExport(
       ? `# ${heading}\n\n${lines.join('\n\n')}\n`
       : `${heading}\n${'='.repeat(Math.min(40, heading.length * 2))}\n\n${lines.join('\n\n')}\n`;
   return {
-    filename: safeTitle ? `${safeTitle}-transcript.${format}` : `transcript.${format}`,
+    filename,
     mimeType: format === 'md' ? 'text/markdown' : 'text/plain',
     content,
   };
@@ -97,7 +186,8 @@ export function downloadTranscript(
   format: TranscriptExportFormat,
   segments: TranscriptSegment[],
   title?: string,
+  recordings?: RecordingDuration[],
 ) {
-  const file = buildTranscriptExport(format, segments, title);
-  triggerDownload(file.filename, file.mimeType, file.content);
+  const file = buildTranscriptExport(format, segments, title, recordings);
+  downloadBlob(file.filename, new Blob([file.content], { type: file.mimeType }));
 }

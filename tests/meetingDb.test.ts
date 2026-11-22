@@ -1,18 +1,26 @@
 import 'fake-indexeddb/auto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
+  exportMeetingArchive,
   getRecordingBlob,
+  importMeetingArchive,
   listMeetings,
+  listMinutes,
   listRecordings,
   listSegments,
   migrateMeetings,
   saveAudioChunk,
   saveInterimSegment,
   saveMeeting,
+  saveMinutes,
   saveRecording,
   saveSegment,
   saveSegments,
+  searchMeetingContent,
+  updateSegmentTranslation,
 } from '../src/client/db/meetingDb';
+import { buildMeetingArchive, readMeetingArchive } from '../src/client/services/meetingArchive';
+import type { MinutesRecord, TranscriptSegment } from '../src/shared/types';
 
 describe('meeting database', () => {
   it('migrates without overwriting newer meetings and retains ordered recording chunks', async () => {
@@ -142,6 +150,149 @@ describe('meeting database', () => {
       'old-second',
       'new-first',
     ]);
+  });
+});
+
+const backupMeeting = {
+  id: '46c51c87-44ad-4ac7-8f8d-2c675e39d152' as const,
+  title: '雙語文字備份',
+  notes: '工作筆記',
+  createdAt: 20,
+  mode: '雙語會議',
+  sourceLang: '繁體中文',
+  targetLang: 'English',
+};
+const backupRecording = {
+  id: 'backup-recording',
+  meetingId: backupMeeting.id,
+  createdAt: 21,
+  mimeType: 'audio/webm',
+  completed: true,
+  durationSeconds: 4,
+};
+const backupSegment: TranscriptSegment = {
+  id: 'backup-segment',
+  meetingId: backupMeeting.id,
+  recordingId: backupRecording.id,
+  track: 'mic',
+  speakerLabel: '我方',
+  startedAtMs: 30,
+  endedAtMs: 900,
+  text: '原文索引',
+  translation: 'Translated index',
+  isFinal: true,
+};
+const backupMinutes: MinutesRecord = {
+  id: 'backup-minutes',
+  meetingId: backupMeeting.id,
+  createdAt: 22,
+  action: 'polish',
+  targetLanguage: '繁體中文',
+  style: 'standard',
+  markdownContent: '# Ｉｎｄｅｘ 摘要',
+};
+
+async function saveBackupFixture() {
+  await saveMeeting(backupMeeting);
+  await saveRecording(backupRecording);
+  await saveSegment(backupSegment);
+  await saveMinutes(backupMinutes);
+  await saveAudioChunk(backupRecording.id, 2, new Blob(['second']));
+  await saveAudioChunk(backupRecording.id, 0, new Blob(['first']));
+}
+
+describe('cross-meeting search', () => {
+  it('finds persisted original text, translations, and minutes and reflects updates', async () => {
+    await saveBackupFixture();
+    expect((await searchMeetingContent(' 原文索引 ')).get(backupMeeting.id)).toEqual(
+      new Set(['transcript']),
+    );
+    expect((await searchMeetingContent('INDEX')).get(backupMeeting.id)).toEqual(
+      new Set(['translation', 'minutes']),
+    );
+    await updateSegmentTranslation(backupSegment.id, 'Revised translation');
+    expect((await searchMeetingContent('index')).get(backupMeeting.id)).toEqual(
+      new Set(['minutes']),
+    );
+    expect((await searchMeetingContent('revised')).get(backupMeeting.id)).toEqual(
+      new Set(['translation']),
+    );
+    expect(await searchMeetingContent('  ')).toEqual(new Map());
+  });
+});
+
+describe('meeting archives', () => {
+  it('exports a single meeting and imports a copy with linked records and ordered audio', async () => {
+    await saveBackupFixture();
+    const file = await exportMeetingArchive({ meetingId: backupMeeting.id, includeAudio: true });
+    const snapshot = await readMeetingArchive(file);
+    expect(snapshot.meetings).toEqual([backupMeeting]);
+    expect(snapshot.audioChunks.map(({ sequence }) => sequence)).toEqual([0, 2]);
+    const [imported] = await importMeetingArchive(file);
+    const [recording] = await listRecordings(imported.id);
+    const [segment] = await listSegments(imported.id);
+    const [minutes] = await listMinutes(imported.id);
+    expect(imported.id).not.toBe(backupMeeting.id);
+    expect(imported).toEqual({ ...backupMeeting, id: imported.id });
+    expect(recording.id).not.toBe(backupRecording.id);
+    expect(recording).toEqual({ ...backupRecording, id: recording.id, meetingId: imported.id });
+    expect(segment.id).not.toBe(backupSegment.id);
+    expect(segment).toEqual({
+      ...backupSegment,
+      id: segment.id,
+      meetingId: imported.id,
+      recordingId: recording.id,
+    });
+    expect(minutes.id).not.toBe(backupMinutes.id);
+    expect(minutes).toEqual({ ...backupMinutes, id: minutes.id, meetingId: imported.id });
+    expect(await (await getRecordingBlob(recording)).text()).toBe('firstsecond');
+    expect(await listSegments(backupMeeting.id)).toEqual([backupSegment]);
+  });
+
+  it('round-trips the workspace without reading audio into the archive by default', async () => {
+    await saveBackupFixture();
+    const before = await listMeetings();
+    const imported = await importMeetingArchive(await exportMeetingArchive());
+    expect(imported.map(({ title }) => title).sort()).toEqual(
+      before.map(({ title }) => title).sort(),
+    );
+    expect(await listMeetings()).toHaveLength(before.length * 2);
+    const copy = imported.find(({ title }) => title === backupMeeting.title)!;
+    const [recording] = await listRecordings(copy.id);
+    expect((await listSegments(copy.id))[0].recordingId).toBe(recording.id);
+    expect((await getRecordingBlob(recording)).size).toBe(0);
+  });
+
+  it('rejects malformed data, duplicate IDs, broken links, and truncated audio before writing', async () => {
+    await saveBackupFixture();
+    const before = await listMeetings();
+    const file = await exportMeetingArchive({ meetingId: backupMeeting.id, includeAudio: true });
+    const data = await readMeetingArchive(file);
+    const invalidFiles = [
+      new Blob(['not a backup']),
+      file.slice(0, file.size - 1),
+      buildMeetingArchive({ ...data, meetings: [...data.meetings, backupMeeting] }),
+      buildMeetingArchive({ ...data, segments: [{ ...backupSegment, recordingId: 'missing' }] }),
+      buildMeetingArchive({ ...data, minutes: [{ ...backupMinutes, createdAt: NaN }] }),
+      buildMeetingArchive({ ...data, audioChunks: [data.audioChunks[0], data.audioChunks[0]] }),
+    ];
+    for (const invalid of invalidFiles)
+      await expect(importMeetingArchive(invalid)).rejects.toThrow();
+    expect(await listMeetings()).toEqual(before);
+  });
+
+  it('rolls back the whole import if a generated ID already exists', async () => {
+    await saveBackupFixture();
+    const file = await exportMeetingArchive({ meetingId: backupMeeting.id, includeAudio: true });
+    const before = await listMeetings();
+    const collision = vi.spyOn(crypto, 'randomUUID').mockReturnValueOnce(backupMeeting.id);
+    try {
+      await expect(importMeetingArchive(file)).rejects.toThrow();
+    } finally {
+      collision.mockRestore();
+    }
+    expect(await listMeetings()).toEqual(before);
+    expect(await listRecordings(backupMeeting.id)).toEqual([backupRecording]);
   });
 });
 

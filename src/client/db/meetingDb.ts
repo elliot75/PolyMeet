@@ -1,5 +1,6 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
 import type { MinutesRecord, TranscriptSegment } from '../../shared/types';
+import { buildMeetingArchive, readMeetingArchive } from '../services/meetingArchive';
 
 export interface Meeting {
   id: string;
@@ -19,7 +20,7 @@ export interface Recording {
   completed: boolean;
   durationSeconds?: number;
 }
-interface AudioChunk {
+export interface AudioChunk {
   recordingId: string;
   sequence: number;
   blob: Blob;
@@ -74,6 +75,51 @@ const db = () => {
   }
   return cached;
 };
+
+export type MeetingSearchSource = 'transcript' | 'translation' | 'minutes';
+
+const searchListeners = new Set<() => void>();
+
+export function subscribeToMeetingContent(listener: () => void): () => void {
+  searchListeners.add(listener);
+  return () => searchListeners.delete(listener);
+}
+
+function notifyMeetingContentChanged() {
+  searchListeners.forEach((listener) => listener());
+}
+
+export function normalizeMeetingQuery(value: string): string {
+  return value.normalize('NFKC').trim().toLowerCase();
+}
+
+export async function searchMeetingContent(
+  query: string,
+): Promise<Map<string, Set<MeetingSearchSource>>> {
+  const matches = new Map<string, Set<MeetingSearchSource>>();
+  const term = normalizeMeetingQuery(query);
+  if (!term) return matches;
+
+  const tx = (await db()).transaction(['segments', 'minutes']);
+  const [segments, minutes] = await Promise.all([
+    tx.objectStore('segments').getAll(),
+    tx.objectStore('minutes').getAll(),
+    tx.done,
+  ]);
+  function match(meetingId: string, source: MeetingSearchSource, text: string | undefined) {
+    if (!text || matches.get(meetingId)?.has(source) || !normalizeMeetingQuery(text).includes(term))
+      return;
+    const sources = matches.get(meetingId) ?? new Set<MeetingSearchSource>();
+    sources.add(source);
+    matches.set(meetingId, sources);
+  }
+  for (const segment of segments) {
+    match(segment.meetingId, 'transcript', segment.text);
+    match(segment.meetingId, 'translation', segment.translation);
+  }
+  for (const record of minutes) match(record.meetingId, 'minutes', record.markdownContent);
+  return matches;
+}
 
 export async function listMeetings(): Promise<Meeting[]> {
   return (await (await db()).getAll('meetings')).sort((a, b) => b.createdAt - a.createdAt);
@@ -131,6 +177,7 @@ export async function saveMinutes(record: MinutesRecord): Promise<void> {
   }
   await tx.objectStore('minutes').put(record);
   await tx.done;
+  notifyMeetingContentChanged();
 }
 export async function listMinutes(meetingId: string): Promise<MinutesRecord[]> {
   return (await (await db()).getAllFromIndex('minutes', 'by-meeting', meetingId)).sort(
@@ -163,6 +210,7 @@ export async function saveSegments(
     await tx.done.catch(() => {});
     throw error;
   }
+  notifyMeetingContentChanged();
 }
 export async function saveInterimSegment(segment: TranscriptSegment): Promise<void> {
   const tx = (await db()).transaction(['recordings', 'segments'], 'readwrite');
@@ -171,9 +219,10 @@ export async function saveInterimSegment(segment: TranscriptSegment): Promise<vo
     segment.recordingId ? tx.objectStore('recordings').get(segment.recordingId) : undefined,
     store.get(segment.id),
   ]);
-  if (recording?.meetingId === segment.meetingId && !previous?.isFinal)
-    await store.put({ ...segment, isFinal: false });
+  const shouldSave = recording?.meetingId === segment.meetingId && !previous?.isFinal;
+  if (shouldSave) await store.put({ ...segment, isFinal: false });
   await tx.done;
+  if (shouldSave) notifyMeetingContentChanged();
 }
 
 export async function listSegments(meetingId: string): Promise<TranscriptSegment[]> {
@@ -198,9 +247,11 @@ export async function updateSegmentTranslation(
   const database = await db();
   const tx = database.transaction('segments', 'readwrite');
   const segment = await tx.store.get(id);
-  if (segment && (isFinal || !segment.translation || segment.translationIsFinal === false))
-    await tx.store.put({ ...segment, translation, translationIsFinal: isFinal });
+  const shouldSave =
+    segment && (isFinal || !segment.translation || segment.translationIsFinal === false);
+  if (shouldSave) await tx.store.put({ ...segment, translation, translationIsFinal: isFinal });
   await tx.done;
+  if (shouldSave) notifyMeetingContentChanged();
 }
 
 export async function updateSegmentText(id: string, text: string): Promise<void> {
@@ -209,6 +260,107 @@ export async function updateSegmentText(id: string, text: string): Promise<void>
   const segment = await tx.store.get(id);
   if (segment) await tx.store.put({ ...segment, text });
   await tx.done;
+  if (segment) notifyMeetingContentChanged();
+}
+
+const archiveStores = ['meetings', 'recordings', 'audioChunks', 'segments', 'minutes'] as const;
+
+export async function exportMeetingArchive({
+  meetingId,
+  includeAudio = false,
+}: { meetingId?: string; includeAudio?: boolean } = {}): Promise<Blob> {
+  const tx = (await db()).transaction(archiveStores);
+  const recordingsStore = tx.objectStore('recordings');
+  const segmentsStore = tx.objectStore('segments');
+  const minutesStore = tx.objectStore('minutes');
+  const chunksStore = tx.objectStore('audioChunks');
+  const recordingsRequest = recordingsStore.index('by-meeting').getAll(meetingId);
+  const chunksRequest = includeAudio
+    ? recordingsRequest.then(async (recordings) => {
+        const byRecording = await Promise.all(
+          recordings.map(({ id }) => chunksStore.index('by-recording').getAll(id)),
+        );
+        return byRecording.flat();
+      })
+    : [];
+  const [meetings, recordings, segments, minutes, audioChunks] = await Promise.all([
+    tx.objectStore('meetings').getAll(meetingId),
+    recordingsRequest,
+    segmentsStore.index('by-meeting').getAll(meetingId),
+    minutesStore.index('by-meeting').getAll(meetingId),
+    chunksRequest,
+    tx.done,
+  ]);
+  if (meetingId !== undefined && meetings.length === 0) throw new Error('找不到要備份的會議。');
+
+  const meetingIds = new Set(meetings.map(({ id }) => id));
+  const savedRecordings = recordings.filter((item) => meetingIds.has(item.meetingId));
+  const recordingOwners = new Map(savedRecordings.map(({ id, meetingId }) => [id, meetingId]));
+  return buildMeetingArchive({
+    meetings,
+    recordings: savedRecordings,
+    segments: segments
+      .filter((item) => meetingIds.has(item.meetingId))
+      .map((item) =>
+        item.recordingId && recordingOwners.get(item.recordingId) !== item.meetingId
+          ? { ...item, recordingId: undefined }
+          : item,
+      ),
+    minutes: minutes.filter((item) => meetingIds.has(item.meetingId)),
+    audioChunks: audioChunks.filter((item) => recordingOwners.has(item.recordingId)),
+  });
+}
+
+export async function importMeetingArchive(file: Blob): Promise<Meeting[]> {
+  const archive = await readMeetingArchive(file);
+  const meetingIds = new Map(archive.meetings.map(({ id }) => [id, crypto.randomUUID()]));
+  const recordingIds = new Map(archive.recordings.map(({ id }) => [id, crypto.randomUUID()]));
+  const meetings = archive.meetings.map((item) => ({ ...item, id: meetingIds.get(item.id)! }));
+  const tx = (await db()).transaction(archiveStores, 'readwrite');
+  try {
+    await Promise.all([
+      tx.done,
+      ...meetings.map(async (item) => tx.objectStore('meetings').add(item)),
+      ...archive.recordings.map(async (item) =>
+        tx.objectStore('recordings').add({
+          ...item,
+          id: recordingIds.get(item.id)!,
+          meetingId: meetingIds.get(item.meetingId)!,
+        }),
+      ),
+      ...archive.segments.map(async (item) =>
+        tx.objectStore('segments').add({
+          ...item,
+          id: crypto.randomUUID(),
+          meetingId: meetingIds.get(item.meetingId)!,
+          recordingId: item.recordingId ? recordingIds.get(item.recordingId)! : undefined,
+        }),
+      ),
+      ...archive.minutes.map(async (item) =>
+        tx.objectStore('minutes').add({
+          ...item,
+          id: crypto.randomUUID(),
+          meetingId: meetingIds.get(item.meetingId)!,
+        }),
+      ),
+      ...archive.audioChunks.map(async (item) =>
+        tx.objectStore('audioChunks').add({
+          ...item,
+          recordingId: recordingIds.get(item.recordingId)!,
+        }),
+      ),
+    ]);
+  } catch (error) {
+    try {
+      tx.abort();
+    } catch {
+      // IndexedDB may have already aborted the transaction.
+    }
+    await tx.done.catch(() => {});
+    throw error;
+  }
+  notifyMeetingContentChanged();
+  return meetings.sort((a, b) => b.createdAt - a.createdAt);
 }
 
 export async function deleteMeeting(meetingId: string): Promise<void> {
@@ -228,4 +380,5 @@ export async function deleteMeeting(meetingId: string): Promise<void> {
   for (const id of minuteIds) await tx.objectStore('minutes').delete(id);
   await tx.objectStore('meetings').delete(meetingId);
   await tx.done;
+  notifyMeetingContentChanged();
 }

@@ -27,6 +27,7 @@ interface Props {
   isBilingual: boolean;
   languageHints: string[];
   segments: TranscriptSegment[];
+  recordings: Recording[];
   interims: Record<string, { track: AudioTrackRole; text: string }>;
   onAppend: (segment: TranscriptSegment) => void;
   onTextChange: (id: string, text: string) => void;
@@ -62,6 +63,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
   isBilingual,
   languageHints,
   segments,
+  recordings,
   interims,
   onAppend,
   onTextChange,
@@ -251,26 +253,19 @@ export const TranscriptFeed = memo(function TranscriptFeed({
           </div>
         </div>
         <div className="section-actions">
-          {segments.length > 0 && (
-            <>
+          {segments.length > 0 &&
+            (['md', 'txt', 'srt', 'vtt'] as const).map((format) => (
               <button
+                key={format}
                 type="button"
                 className="secondary small-button"
-                onClick={() => downloadTranscript('md', segments, meetingTitle)}
+                aria-label={`匯出 ${format.toUpperCase()} ${format === 'srt' || format === 'vtt' ? '字幕' : '逐字稿'}`}
+                onClick={() => downloadTranscript(format, segments, meetingTitle, recordings)}
               >
                 <IconDownload size={14} />
-                <span>.md</span>
+                <span>.{format}</span>
               </button>
-              <button
-                type="button"
-                className="secondary small-button"
-                onClick={() => downloadTranscript('txt', segments, meetingTitle)}
-              >
-                <IconDownload size={14} />
-                <span>.txt</span>
-              </button>
-            </>
-          )}
+            ))}
           <button
             type="button"
             className="secondary small-button"

@@ -397,6 +397,11 @@ li {
   margin-top: 2px;
 }
 
+.meeting .meeting-search-match {
+  color: var(--brand);
+  overflow-wrap: anywhere;
+}
+
 .sidebar-empty {
   text-align: center;
   padding: 24px 10px;
@@ -423,7 +428,12 @@ li {
   font-size: 11px;
 }
 
+.local-workspace-info .small-button {
+  margin-top: 6px;
+}
+
 .avatar {
+  flex: none;
   background: var(--brand-soft);
   color: var(--brand);
   border-radius: 50%;
@@ -1681,6 +1691,40 @@ dialog.confirm-dialog {
 
 dialog.upload-dialog {
   max-width: min(520px, calc(100% - 32px));
+}
+
+dialog.archive-dialog {
+  max-width: min(440px, calc(100% - 32px));
+}
+
+.archive-section {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+  padding-top: 16px;
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.archive-section h3,
+.archive-section p {
+  margin: 0;
+}
+
+.archive-scope,
+.archive-audio,
+.archive-file-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.archive-filename {
+  overflow-wrap: anywhere;
+  min-width: 0;
+  max-width: 100%;
 }
 
 @media (prefers-reduced-motion: no-preference) {
