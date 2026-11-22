@@ -1,6 +1,18 @@
-import { memo, useEffect, useRef, useState, type DragEvent, type HTMLAttributes } from 'react';
-import { splitAudio } from '../audio/audioChunker';
 import {
+  memo,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type DragEvent,
+  type HTMLAttributes,
+} from 'react';
+import type { AudioTrackRole, TranscriptSegment } from '../../shared/types';
+import { splitAudio } from '../audio/audioChunker';
+import { uploadedSegments, type FileTranscriptionResult } from '../audio/uploadedSegments';
+import {
+  MAX_SPEAKER_LABEL_LENGTH,
+  renameSegmentSpeaker,
   saveSegments,
   saveUploadedRecording,
   updateSegmentText,
@@ -8,7 +20,6 @@ import {
 } from '../db/meetingDb';
 import { downloadTranscript, formatTimestamp } from '../services/exporter';
 import { headers, type Settings } from '../services/settings';
-import type { AudioTrackRole, TranscriptSegment } from '../../shared/types';
 import { closeDialogAnimated, isPointerOutsideDialog, openDialogModal } from '../utils/dialog';
 import {
   IconAlertCircle,
@@ -30,6 +41,7 @@ interface Props {
   interims: Record<string, { track: AudioTrackRole; text: string }>;
   onAppend: (segment: TranscriptSegment) => void;
   onTextChange: (id: string, text: string) => void;
+  onSpeakerChange: (meetingId: string, ids: string[], name: string) => void;
   onRecordingSaved: () => void;
   onBusyChange: (busy: boolean) => void;
   onSeek: (recordingId: string, seconds: number) => void;
@@ -65,6 +77,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
   interims,
   onAppend,
   onTextChange,
+  onSpeakerChange,
   onRecordingSaved,
   onBusyChange,
   onSeek,
@@ -80,6 +93,17 @@ export const TranscriptFeed = memo(function TranscriptFeed({
   const [editError, setEditError] = useState('');
   const [dragging, setDragging] = useState(false);
   const [filterQuery, setFilterQuery] = useState('');
+  const [renameTarget, setRenameTarget] = useState<TranscriptSegment | null>(null);
+  const [speakerName, setSpeakerName] = useState('');
+  const [renameAll, setRenameAll] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [renameError, setRenameError] = useState('');
+  const [renameStatus, setRenameStatus] = useState('');
+  const renameId = useId();
+  const renameDialog = useRef<HTMLDialogElement>(null);
+  const renameButton = useRef<HTMLButtonElement>(null);
+  const speakerNameInput = useRef<HTMLInputElement>(null);
+  const filterInput = useRef<HTMLInputElement>(null);
   const dialog = useRef<HTMLDialogElement>(null);
   const input = useRef<HTMLInputElement>(null);
   const abort = useRef<AbortController | null>(null);
@@ -90,6 +114,32 @@ export const TranscriptFeed = memo(function TranscriptFeed({
   const pressedOutside = useRef(false);
 
   useEffect(() => () => abort.current?.abort(), []);
+
+  useEffect(() => {
+    if (renameTarget) {
+      openDialogModal(renameDialog.current);
+      speakerNameInput.current?.focus();
+      speakerNameInput.current?.select();
+    }
+  }, [renameTarget]);
+
+  async function saveSpeakerName() {
+    const name = speakerName.trim();
+    if (!renameTarget || !name || name === renameTarget.speakerLabel || renaming || busy || locked)
+      return;
+    setRenaming(true);
+    setRenameError('');
+    try {
+      const ids = await renameSegmentSpeaker(renameTarget, name, renameAll ? 'speaker' : 'segment');
+      onSpeakerChange(meetingId, ids, name);
+      setRenameStatus(`已更新 ${ids.length} 段逐字稿的語者名稱。`);
+      await closeDialogAnimated(renameDialog.current);
+    } catch {
+      setRenameError('無法儲存語者名稱。若逐字稿已在其他分頁修改，請重新載入後再試。');
+    } finally {
+      setRenaming(false);
+    }
+  }
 
   function choose(next: File | undefined) {
     if (!next || abort.current) return;
@@ -169,28 +219,9 @@ export const TranscriptFeed = memo(function TranscriptFeed({
                 : '音檔轉錄失敗，請檢查模型、金鑰及後端服務。',
           );
         }
-        const result = await response.json();
+        const result: FileTranscriptionResult = await response.json();
         controller.signal.throwIfAborted();
-        const items: { text: string; startSeconds: number; endSeconds?: number }[] = Array.isArray(
-          result.segments,
-        )
-          ? result.segments
-          : result.text?.trim()
-            ? [{ text: result.text.trim(), startSeconds: 0 }]
-            : [];
-        const segments: TranscriptSegment[] = items.map((item) => ({
-          id: crypto.randomUUID(),
-          meetingId,
-          recordingId: upload.recording.id,
-          track: 'upload',
-          speakerLabel: '音檔',
-          startedAtMs: part.offsetMs + item.startSeconds * 1000,
-          timeIsChunkStart: !Array.isArray(result.segments),
-          endedAtMs:
-            item.endSeconds === undefined ? undefined : part.offsetMs + item.endSeconds * 1000,
-          text: item.text,
-          isFinal: true,
-        }));
+        const segments = uploadedSegments(result, upload.recording, part);
         await saveSegments(meetingId, segments);
         upload.completed = part.index;
         segments.forEach(onAppend);
@@ -446,7 +477,88 @@ export const TranscriptFeed = memo(function TranscriptFeed({
         </div>
       </dialog>
 
+      <dialog
+        ref={renameDialog}
+        className="speaker-dialog"
+        aria-labelledby={`${renameId}-title`}
+        onCancel={(event) => {
+          event.preventDefault();
+          if (!renaming) void closeDialogAnimated(renameDialog.current);
+        }}
+        onClose={() => {
+          setRenameTarget(null);
+          (renameButton.current?.isConnected ? renameButton.current : filterInput.current)?.focus();
+          renameButton.current = null;
+        }}
+      >
+        <div className="dialog-header">
+          <h2 id={`${renameId}-title`}>更名語者</h2>
+        </div>
+        <form
+          className="speaker-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void saveSpeakerName();
+          }}
+        >
+          <label htmlFor={`${renameId}-name`}>語者名稱</label>
+          <input
+            id={`${renameId}-name`}
+            ref={speakerNameInput}
+            required
+            maxLength={MAX_SPEAKER_LABEL_LENGTH}
+            readOnly={renaming}
+            value={speakerName}
+            onChange={(event) => setSpeakerName(event.target.value)}
+          />
+          <label className="speaker-scope">
+            <input
+              type="checkbox"
+              checked={renameAll}
+              disabled={renaming}
+              onChange={(event) => setRenameAll(event.target.checked)}
+            />
+            <span>
+              {renameTarget?.recordingId
+                ? '一併更名此錄音中具有相同語者標籤的段落'
+                : '一併更名此會議中未連結錄音、且語者標籤相同的段落'}
+            </span>
+          </label>
+          {renameError && (
+            <p className="error" role="alert">
+              {renameError}
+            </p>
+          )}
+          <div className="dialog-actions">
+            <button
+              type="button"
+              className="secondary"
+              disabled={renaming}
+              onClick={() => void closeDialogAnimated(renameDialog.current)}
+            >
+              取消
+            </button>
+            <button
+              type="submit"
+              className="record"
+              disabled={
+                renaming ||
+                busy ||
+                locked ||
+                !speakerName.trim() ||
+                speakerName.trim() === renameTarget?.speakerLabel
+              }
+            >
+              {renaming ? '正在儲存…' : '儲存名稱'}
+            </button>
+          </div>
+        </form>
+      </dialog>
+
       <div className="card transcript-card">
+        <div role="status">
+          {renameStatus && <p className="hint transcript-inline-error">{renameStatus}</p>}
+        </div>
         {editError && (
           <p className="error transcript-inline-error" role="alert">
             <IconAlertCircle size={15} />
@@ -459,6 +571,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
             <label className="search compact-search">
               <IconSearch size={14} />
               <input
+                ref={filterInput}
                 value={filterQuery}
                 onChange={(event) => setFilterQuery(event.target.value)}
                 placeholder="搜尋逐字稿或譯文…"
@@ -494,6 +607,23 @@ export const TranscriptFeed = memo(function TranscriptFeed({
                   >
                     {segment.speakerLabel}
                   </span>
+                  <button
+                    type="button"
+                    className="speaker-rename"
+                    aria-label={`更名 ${segment.speakerLabel}（${formatTimestamp(segment.startedAtMs)}）`}
+                    aria-haspopup="dialog"
+                    disabled={busy || locked}
+                    onClick={(event) => {
+                      renameButton.current = event.currentTarget;
+                      setSpeakerName(segment.speakerLabel);
+                      setRenameAll(false);
+                      setRenameError('');
+                      setRenameStatus('');
+                      setRenameTarget(segment);
+                    }}
+                  >
+                    更名
+                  </button>
                   {segment.recordingId ? (
                     <button
                       type="button"

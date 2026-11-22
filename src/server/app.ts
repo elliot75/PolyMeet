@@ -6,7 +6,12 @@ import { GoogleGenAI, createPartFromUri, createUserContent } from '@google/genai
 import OpenAI from 'openai';
 import { isProvider, providerKey } from './config';
 import { generateText } from './providers/text';
-import { parseTimedTranscript, transcriptSchema } from './providers/transcription';
+import {
+  openAITranscriptionFormat,
+  parseOpenAITranscript,
+  parseTimedTranscript,
+  transcriptSchema,
+} from './providers/transcription';
 import { isAllowedOrigin } from './origin';
 import { convertMarkdown, languageInstruction, scriptConverter } from './language';
 
@@ -208,11 +213,22 @@ app.post(
           {
             file,
             model: trimmedModel,
+            ...openAITranscriptionFormat(trimmedModel),
             ...(languageHints.length === 1 ? { language: languageHints[0].split('-')[0] } : {}),
           },
           { signal: c.req.raw.signal },
         );
-        return c.json({ text: convert(result.text) });
+        const transcript = parseOpenAITranscript(result);
+        return c.json(
+          'segments' in transcript
+            ? {
+                segments: transcript.segments.map((segment) => ({
+                  ...segment,
+                  text: convert(segment.text),
+                })),
+              }
+            : { text: convert(transcript.text) },
+        );
       }
       const client = new GoogleGenAI({ apiKey: key });
       let uploaded = await client.files.upload({ file, config: { mimeType } });
@@ -238,7 +254,7 @@ app.post(
           model: trimmedModel,
           contents: createUserContent([
             createPartFromUri(uploaded.uri, uploaded.mimeType),
-            `Transcribe all spoken words faithfully in the original languages. ${languageHints.length ? languageInstruction(languageHints) : ''} Add languageCode per utterance using the selected language tags when identifiable. Split into coherent utterances with approximate start and end times in seconds relative to the beginning of this audio. Return an empty segments array if no speech is present.`,
+            `Transcribe all spoken words faithfully in the original languages. ${languageHints.length ? languageInstruction(languageHints) : ''} Add languageCode per utterance using the selected language tags when identifiable. Split at speaker changes and into coherent utterances with approximate start and end times in seconds relative to the beginning of this audio. If multiple speakers can be distinguished, use stable anonymous speaker labels (語者 A, 語者 B, and so on) consistently throughout this audio; do not guess names and omit speaker when uncertain. Return an empty segments array if no speech is present.`,
           ]),
           config: {
             responseMimeType: 'application/json',
@@ -246,10 +262,9 @@ app.post(
             abortSignal: c.req.raw.signal,
           },
         });
-        segments = parseTimedTranscript(result.text || '').map((segment) => ({
-          startSeconds: segment.startSeconds,
-          endSeconds: segment.endSeconds,
-          text: convert(segment.text, segment.languageCode),
+        segments = parseTimedTranscript(result.text || '').map(({ languageCode, ...segment }) => ({
+          ...segment,
+          text: convert(segment.text, languageCode),
         }));
       } catch {
         failed = true;
