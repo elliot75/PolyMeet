@@ -1064,6 +1064,10 @@ dialog select {
   gap: 10px;
 }
 
+.audio-controls[hidden] {
+  display: none;
+}
+
 .audio audio {
   flex: 1;
   min-width: 220px;

@@ -176,6 +176,7 @@ describe('websocket setup and recovery', () => {
       segmentId: 'failed-item',
       text: '',
       track: 'mic',
+      failed: true,
     });
     expect(await nextEvent()).toEqual({
       type: 'error',

@@ -212,6 +212,91 @@ describe('live transcription reconnect', () => {
   });
 });
 
+describe('live audio replay boundaries', () => {
+  function openClient(provider: 'gemini' | 'openai') {
+    vi.useFakeTimers();
+    vi.stubGlobal('window', { setTimeout, clearTimeout });
+    vi.stubGlobal('location', { protocol: 'http:', host: 'localhost:5173' });
+    vi.stubGlobal('WebSocket', FakeSocket);
+    const model = provider === 'gemini' ? 'gemini-3.5-transcribe-live' : 'gpt-4o-transcribe';
+    const events = vi.fn();
+    const client = new LiveSttClient(
+      {
+        type: 'session.start',
+        provider,
+        model,
+        sampleRate: provider === 'gemini' ? 16000 : 24000,
+        track: 'mic',
+      },
+      events,
+    );
+    const open = (index: number) => {
+      const socket = FakeSocket.instances[index];
+      socket.open();
+      socket.message({ type: 'session.ready', provider, model });
+      return socket;
+    };
+    client.connect();
+    return { client, events, socket: open(0), open };
+  }
+
+  it('does not report buffer loss while a connected server VAD track is silent', () => {
+    const { client, events } = openClient('openai');
+    const silence = new Uint8Array(4800).buffer;
+    for (let index = 0; index < 3001; index++) client.audio(silence, 0);
+    expect(events.mock.calls.some(([event]) => event.code === 'audio_buffer_full')).toBe(false);
+    client.stop();
+  });
+
+  it.each([200, undefined])(
+    'acknowledges finalized Gemini audio after noise (end offset %s)',
+    async (audioEndMs) => {
+      const { client, socket, open } = openClient('gemini');
+      const packet = (byte: number) => new Uint8Array(3200).fill(byte).buffer;
+      client.audio(packet(1), 0.1, true); // noise, no transcript
+      client.commit();
+      client.audio(packet(2), 0.1, true);
+      client.commit();
+      client.audio(packet(3), 0.1, true);
+      if (audioEndMs !== undefined) client.commit();
+      socket.message({
+        type: 'transcript.final',
+        segmentId: 'done',
+        track: 'mic',
+        text: 'speech',
+        audioEndMs,
+      });
+      socket.close();
+      await vi.advanceTimersByTimeAsync(1000);
+      const frames = open(1).sent.slice(1);
+      expect(
+        frames
+          .filter(({ type }) => type === 'audio.chunk')
+          .map(({ pcm16Base64 }) => atob(pcm16Base64).charCodeAt(0)),
+      ).toEqual([3]);
+      client.stop();
+    },
+  );
+
+  it('retains unacknowledged Gemini speech beyond a minute', async () => {
+    const { client, socket, open } = openClient('gemini');
+    client.audio(new Uint8Array([1, 2]).buffer);
+    client.commit();
+    await vi.advanceTimersByTimeAsync(61_000);
+    client.audio(new Uint8Array([3, 4]).buffer);
+    client.commit();
+    socket.close();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(open(1).sent.slice(1)).toEqual([
+      { type: 'audio.chunk', pcm16Base64: 'AQI=' },
+      { type: 'audio.commit' },
+      { type: 'audio.chunk', pcm16Base64: 'AwQ=' },
+      { type: 'audio.commit' },
+    ]);
+    client.stop();
+  });
+});
+
 describe('out-of-order live results', () => {
   it('waits for every unfinished segment rather than only the last event', async () => {
     vi.useFakeTimers();
@@ -284,6 +369,75 @@ describe('speech finalization', () => {
     const complete = client.waitForFinal(100);
     await vi.advanceTimersByTimeAsync(2000);
     expect(await complete).toBe(true);
+    client.stop();
+  });
+
+  it('aligns OpenAI server_vad turns cleanly without ghost commit batches or false buffer-loss errors', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('window', { setTimeout, clearTimeout });
+    vi.stubGlobal('location', { protocol: 'http:', host: 'localhost:5173' });
+    vi.stubGlobal('WebSocket', FakeSocket);
+    const events = vi.fn();
+    const startVad = {
+      type: 'session.start',
+      provider: 'openai',
+      model: 'gpt-4o-transcribe',
+      sampleRate: 24000,
+      track: 'mic',
+    } as const;
+    const client = new LiveSttClient(startVad, events);
+    client.connect();
+    const first = FakeSocket.instances[0];
+    first.open();
+    first.message({ type: 'session.ready', provider: 'openai', model: 'gpt-4o-transcribe' });
+
+    // Even 20 noise bursts + worklet commits must not emit audio.commit or accumulate ghost batches.
+    for (let i = 0; i < 20; i++) {
+      client.noteSpeechStart();
+      client.audio(new Uint8Array([i]).buffer, 0.05, true);
+      client.commit();
+    }
+    expect(first.sent.some((frame) => frame.type === 'audio.commit')).toBe(false);
+    expect(events.mock.calls.some(([ev]) => ev.code === 'audio_buffer_full')).toBe(false);
+
+    // Finalize the first turn, then leave a newer utterance pending across reconnect.
+    first.message({ type: 'transcript.committed', segmentId: 'turn-1' });
+    first.message({ type: 'transcript.final', segmentId: 'turn-1', track: 'mic', text: 'done' });
+    client.audio(new Uint8Array([77, 88]).buffer, 0.1, true);
+    first.close();
+
+    await vi.advanceTimersByTimeAsync(1000);
+    const second = FakeSocket.instances[1];
+    second.open();
+    second.message({ type: 'session.ready', provider: 'openai', model: 'gpt-4o-transcribe' });
+    expect(second.sent.slice(1)).toEqual([{ type: 'audio.chunk', pcm16Base64: 'TVg=' }]);
+    client.stop();
+  });
+
+  it('expires stale unfinalized speech markers so waitForFinal does not hang on noise', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('window', { setTimeout, clearTimeout });
+    vi.stubGlobal('location', { protocol: 'http:', host: 'localhost:5173' });
+    vi.stubGlobal('WebSocket', FakeSocket);
+    const client = new LiveSttClient(
+      {
+        type: 'session.start',
+        provider: 'openai',
+        model: 'gpt-4o-transcribe',
+        sampleRate: 24000,
+        track: 'mic',
+      },
+      () => {},
+    );
+    client.connect();
+    const socket = FakeSocket.instances[0];
+    socket.open();
+    socket.message({ type: 'session.ready', provider: 'openai', model: 'gpt-4o-transcribe' });
+    client.noteSpeechStart();
+    await vi.advanceTimersByTimeAsync(25_000);
+    const settled = client.waitForFinal(100);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(await settled).toBe(true);
     client.stop();
   });
 });

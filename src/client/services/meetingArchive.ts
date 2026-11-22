@@ -1,4 +1,8 @@
-import type { MinutesRecord, TranscriptSegment } from '../../shared/types';
+import {
+  MAX_SPEAKER_LABEL_LENGTH,
+  type MinutesRecord,
+  type TranscriptSegment,
+} from '../../shared/types';
 import type { AudioChunk, Meeting, Recording } from '../db/meetingDb';
 
 export interface MeetingArchiveData {
@@ -11,6 +15,7 @@ export interface MeetingArchiveData {
 
 const signature = new TextEncoder().encode('PolyMeet\n');
 const headerSize = signature.length + 4;
+const MAX_MANIFEST_BYTES = 32 * 1024 * 1024;
 
 // A versioned JSON manifest is followed by the raw audio bytes in manifest order.
 export function buildMeetingArchive(data: MeetingArchiveData): Blob {
@@ -63,65 +68,113 @@ function isOptionalBoolean(value: unknown): value is boolean | undefined {
   return value === undefined || typeof value === 'boolean';
 }
 
-function isMeeting(value: unknown): value is Meeting {
-  return (
+function parseMeeting(value: unknown): Meeting {
+  requireValid(
     isRecord(value) &&
-    isId(value.id) &&
-    isDate(value.createdAt) &&
-    typeof value.title === 'string' &&
-    typeof value.notes === 'string' &&
-    typeof value.mode === 'string' &&
-    isOptionalString(value.sourceLang) &&
-    isOptionalString(value.targetLang)
+      isId(value.id) &&
+      isDate(value.createdAt) &&
+      typeof value.title === 'string' &&
+      typeof value.notes === 'string' &&
+      (value.mode === '一般會議' || value.mode === '雙語會議') &&
+      isOptionalString(value.sourceLang) &&
+      isOptionalString(value.targetLang),
   );
+  return {
+    id: value.id,
+    createdAt: value.createdAt,
+    title: value.title,
+    notes: value.notes,
+    mode: value.mode,
+    ...(value.sourceLang !== undefined ? { sourceLang: value.sourceLang } : {}),
+    ...(value.targetLang !== undefined ? { targetLang: value.targetLang } : {}),
+  };
 }
 
-function isRecording(value: unknown): value is Recording {
-  return (
+function parseRecording(value: unknown): Recording {
+  requireValid(
     isRecord(value) &&
-    isId(value.id) &&
-    isId(value.meetingId) &&
-    isDate(value.createdAt) &&
-    typeof value.mimeType === 'string' &&
-    isOptionalString(value.filename) &&
-    typeof value.completed === 'boolean' &&
-    (value.durationSeconds === undefined || isNonnegative(value.durationSeconds))
+      isId(value.id) &&
+      isId(value.meetingId) &&
+      isDate(value.createdAt) &&
+      typeof value.mimeType === 'string' &&
+      isOptionalString(value.filename) &&
+      typeof value.completed === 'boolean' &&
+      (value.durationSeconds === undefined || isNonnegative(value.durationSeconds)),
   );
+  return {
+    id: value.id,
+    meetingId: value.meetingId,
+    createdAt: value.createdAt,
+    mimeType: value.mimeType,
+    completed: value.completed,
+    ...(value.filename !== undefined ? { filename: value.filename } : {}),
+    ...(value.durationSeconds !== undefined ? { durationSeconds: value.durationSeconds } : {}),
+  };
 }
 
-function isSegment(value: unknown): value is TranscriptSegment {
-  return (
+function parseSegment(value: unknown): TranscriptSegment {
+  requireValid(
     isRecord(value) &&
-    isId(value.id) &&
-    isId(value.meetingId) &&
-    (value.recordingId === undefined || isId(value.recordingId)) &&
-    (value.track === 'mic' ||
-      value.track === 'system' ||
-      value.track === 'mixed' ||
-      value.track === 'upload') &&
-    typeof value.speakerLabel === 'string' &&
-    (value.speakerGroup === undefined || isId(value.speakerGroup)) &&
-    isNonnegative(value.startedAtMs) &&
-    (value.endedAtMs === undefined || isNonnegative(value.endedAtMs)) &&
-    isOptionalBoolean(value.timeIsChunkStart) &&
-    typeof value.text === 'string' &&
-    isOptionalString(value.translation) &&
-    isOptionalBoolean(value.translationIsFinal) &&
-    typeof value.isFinal === 'boolean'
+      isId(value.id) &&
+      isId(value.meetingId) &&
+      (value.recordingId === undefined || isId(value.recordingId)) &&
+      (value.track === 'mic' ||
+        value.track === 'system' ||
+        value.track === 'mixed' ||
+        value.track === 'upload') &&
+      typeof value.speakerLabel === 'string' &&
+      value.speakerLabel.length <= MAX_SPEAKER_LABEL_LENGTH &&
+      (value.speakerGroup === undefined || isId(value.speakerGroup)) &&
+      isNonnegative(value.startedAtMs) &&
+      (value.endedAtMs === undefined ||
+        (isNonnegative(value.endedAtMs) && value.endedAtMs >= value.startedAtMs)) &&
+      isOptionalBoolean(value.timeIsChunkStart) &&
+      typeof value.text === 'string' &&
+      isOptionalString(value.translation) &&
+      isOptionalBoolean(value.translationIsFinal) &&
+      typeof value.isFinal === 'boolean',
   );
+  return {
+    id: value.id,
+    meetingId: value.meetingId,
+    track: value.track,
+    speakerLabel: value.speakerLabel,
+    startedAtMs: value.startedAtMs,
+    text: value.text,
+    isFinal: value.isFinal,
+    ...(value.recordingId !== undefined ? { recordingId: value.recordingId } : {}),
+    ...(value.speakerGroup !== undefined ? { speakerGroup: value.speakerGroup } : {}),
+    ...(value.endedAtMs !== undefined ? { endedAtMs: value.endedAtMs } : {}),
+    ...(value.timeIsChunkStart !== undefined ? { timeIsChunkStart: value.timeIsChunkStart } : {}),
+    ...(value.translation !== undefined ? { translation: value.translation } : {}),
+    ...(value.translationIsFinal !== undefined
+      ? { translationIsFinal: value.translationIsFinal }
+      : {}),
+  };
 }
 
-function isMinutes(value: unknown): value is MinutesRecord {
-  return (
+function parseMinutes(value: unknown): MinutesRecord {
+  requireValid(
     isRecord(value) &&
-    isId(value.id) &&
-    isId(value.meetingId) &&
-    isDate(value.createdAt) &&
-    (value.action === 'polish' || value.action === 'translate_and_polish') &&
-    (value.style === 'standard' || value.style === 'action_items' || value.style === 'detailed') &&
-    typeof value.targetLanguage === 'string' &&
-    typeof value.markdownContent === 'string'
+      isId(value.id) &&
+      isId(value.meetingId) &&
+      isDate(value.createdAt) &&
+      (value.action === 'polish' || value.action === 'translate_and_polish') &&
+      (value.style === 'standard' ||
+        value.style === 'action_items' ||
+        value.style === 'detailed') &&
+      typeof value.targetLanguage === 'string' &&
+      typeof value.markdownContent === 'string',
   );
+  return {
+    id: value.id,
+    meetingId: value.meetingId,
+    createdAt: value.createdAt,
+    action: value.action,
+    style: value.style,
+    targetLanguage: value.targetLanguage,
+    markdownContent: value.markdownContent,
+  };
 }
 
 function recordsById<T extends { id: string }>(records: T[]): Map<string, T> {
@@ -137,7 +190,7 @@ export async function readMeetingArchive(file: Blob): Promise<MeetingArchiveData
   );
   const manifestSize = new DataView(header.buffer).getUint32(signature.length);
   let audioOffset = headerSize + manifestSize;
-  requireValid(audioOffset <= file.size);
+  requireValid(manifestSize <= MAX_MANIFEST_BYTES && audioOffset <= file.size);
   let manifest: unknown;
   try {
     const bytes = await file.slice(headerSize, audioOffset).arrayBuffer();
@@ -147,12 +200,23 @@ export async function readMeetingArchive(file: Blob): Promise<MeetingArchiveData
   }
   requireValid(isRecord(manifest));
   if (manifest.version !== 1) throw new Error('不支援此備份檔案版本。');
-  const { meetings, recordings, segments, minutes, audioChunks: descriptors } = manifest;
-  requireValid(Array.isArray(meetings) && meetings.every(isMeeting));
-  requireValid(Array.isArray(recordings) && recordings.every(isRecording));
-  requireValid(Array.isArray(segments) && segments.every(isSegment));
-  requireValid(Array.isArray(minutes) && minutes.every(isMinutes));
+  const {
+    meetings: rawMeetings,
+    recordings: rawRecordings,
+    segments: rawSegments,
+    minutes: rawMinutes,
+    audioChunks: descriptors,
+  } = manifest;
+  requireValid(Array.isArray(rawMeetings));
+  requireValid(Array.isArray(rawRecordings));
+  requireValid(Array.isArray(rawSegments));
+  requireValid(Array.isArray(rawMinutes));
   requireValid(Array.isArray(descriptors));
+
+  const meetings = rawMeetings.map(parseMeeting);
+  const recordings = rawRecordings.map(parseRecording);
+  const segments = rawSegments.map(parseSegment);
+  const minutes = rawMinutes.map(parseMinutes);
 
   const meetingIds = recordsById(meetings);
   const recordingIds = recordsById(recordings);

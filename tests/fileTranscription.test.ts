@@ -229,4 +229,77 @@ describe('file and saved recording transcription', () => {
     );
     expect(await listRecordings(recording.meetingId)).toHaveLength(2);
   });
+
+  it('splits small long OpenAI files from either upload entry point when duration is unknown', async () => {
+    const { recording, options } = await setup();
+    const settings = { ...options.settings, sttProvider: 'openai' as const };
+    vi.stubGlobal(
+      'AudioContext',
+      class {
+        async decodeAudioData() {
+          return { duration: 1250 };
+        }
+        async close() {}
+      },
+    );
+    vi.stubGlobal(
+      'OfflineAudioContext',
+      class {
+        destination = {};
+        createBufferSource() {
+          return { buffer: null, connect() {}, start() {} };
+        }
+        async startRendering() {
+          return { getChannelData: () => new Float32Array(1) };
+        }
+      },
+    );
+    const uploadedParts: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        uploadedParts.push(((init.body as FormData).get('file') as File).name);
+        return Response.json({ text: 'sample' });
+      }),
+    );
+    const upload = new File(['audio'], 'long.m4a', { type: 'audio/mp4' });
+    const offsets: number[] = [];
+    for await (const part of transcribeAudio(upload, { ...options, settings })) {
+      offsets.push(part.segments[0].startedAtMs);
+    }
+    expect(offsets).toEqual([0, 600_000, 1_200_000]);
+    const recovered = await transcribeSavedRecording({ ...options, settings, recording });
+    expect(recovered.map(({ startedAtMs }) => startedAtMs)).toEqual(offsets);
+    expect(uploadedParts).toEqual([
+      'part-1.wav',
+      'part-2.wav',
+      'part-3.wav',
+      'part-1.wav',
+      'part-2.wav',
+      'part-3.wav',
+    ]);
+  });
+
+  it('surfaces auth_failed distinctly and normalizes missing MIME types on saved recordings', async () => {
+    const { options, recording } = await setup();
+    const m4aRec = {
+      ...recording,
+      id: crypto.randomUUID(),
+      filename: 'voice-memo.m4a',
+      mimeType: '',
+    };
+    await saveRecording(m4aRec);
+    await saveAudioChunk(m4aRec.id, 0, new Blob(['audio-data']));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const sentFile = (init.body as FormData).get('file') as File;
+        expect(sentFile.type).toBe('audio/mp4');
+        return Response.json({ error: 'auth_failed' }, { status: 401 });
+      }),
+    );
+    await expect(transcribeSavedRecording({ ...options, recording: m4aRec })).rejects.toThrow(
+      'API 金鑰驗證失敗或無此模型權限，請檢查設定。',
+    );
+  });
 });

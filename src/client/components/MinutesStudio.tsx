@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { listMinutes, saveMinutes } from '../db/meetingDb';
@@ -6,6 +6,7 @@ import type { MinutesAction, MinutesRecord, MinutesStyle } from '../../shared/ty
 import { streamText } from '../services/apiClient';
 import { downloadMinutes } from '../services/exporter';
 import type { Settings } from '../services/settings';
+import type { EditSaveQueue } from '../services/editSaveQueue';
 import { IconCheck, IconCopy, IconDownload, IconSparkles, IconStop } from './Icons';
 
 export const MinutesStudio = memo(function MinutesStudio({
@@ -16,6 +17,7 @@ export const MinutesStudio = memo(function MinutesStudio({
   settings,
   onBusyChange,
   onRecordsCountChange,
+  editSaves,
 }: {
   meetingId: string;
   meetingTitle: string;
@@ -24,6 +26,7 @@ export const MinutesStudio = memo(function MinutesStudio({
   settings: Settings;
   onBusyChange: (busy: boolean) => void;
   onRecordsCountChange?: (count: number) => void;
+  editSaves: EditSaveQueue<MinutesRecord>;
 }) {
   const languagesKey = meetingLanguages.join(',');
   const defaultLanguage =
@@ -40,10 +43,20 @@ export const MinutesStudio = memo(function MinutesStudio({
   const [preview, setPreview] = useState(true);
   const [saving, setSaving] = useState(false);
   const [copied, setCopied] = useState(false);
-  const saveQueue = useRef<Promise<void>>(Promise.resolve());
   const saveSequence = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
   const copyTimerRef = useRef<number | undefined>(undefined);
+
+  const flushEdits = useCallback(
+    () => editSaves.flush((record) => record.meetingId === meetingId),
+    [editSaves, meetingId],
+  );
+  useEffect(
+    () => () => {
+      void flushEdits();
+    },
+    [flushEdits],
+  );
 
   useEffect(() => {
     return () => {
@@ -67,9 +80,12 @@ export const MinutesStudio = memo(function MinutesStudio({
     setError('');
     setNotice('');
     setCopied(false);
-    listMinutes(meetingId)
-      .then((items) => {
+    flushEdits()
+      .then(() => listMinutes(meetingId))
+      .then((savedItems) => {
         if (!mounted) return;
+        const pendingEdits = new Map(editSaves.values().map((item) => [item.id, item]));
+        const items = savedItems.map((item) => pendingEdits.get(item.id) ?? item);
         setRecords(items);
         if (items.length > 0) {
           setActive(items[0].id);
@@ -85,7 +101,7 @@ export const MinutesStudio = memo(function MinutesStudio({
     return () => {
       mounted = false;
     };
-  }, [meetingId]);
+  }, [meetingId, editSaves, flushEdits]);
 
   const renderedHtml = useMemo(() => {
     if (!preview || !content) return '';
@@ -107,11 +123,16 @@ export const MinutesStudio = memo(function MinutesStudio({
     onBusyChange(true);
     setError('');
     setNotice('');
-    setContent('');
-    setActive(null);
-    setPreview(false);
     let output = '';
     try {
+      if (!(await flushEdits())) {
+        setError('無法保存目前的會議紀錄修改，請檢查瀏覽器儲存空間後重試。');
+        return;
+      }
+      controller.signal.throwIfAborted();
+      setContent('');
+      setActive(null);
+      setPreview(false);
       await streamText(
         settings,
         'minutes',
@@ -189,16 +210,11 @@ export const MinutesStudio = memo(function MinutesStudio({
     setRecords((old) => old.map((item) => (item.id === updated.id ? updated : item)));
     const sequence = ++saveSequence.current;
     setSaving(true);
-    saveQueue.current = saveQueue.current
-      .catch(() => {})
-      .then(() => saveMinutes(updated))
-      .then(() => {
-        if (sequence === saveSequence.current) setSaving(false);
-      })
-      .catch(() => {
-        setSaving(false);
-        setError('無法保存會議紀錄，請檢查瀏覽器儲存空間。');
-      });
+    editSaves.schedule(updated.id, updated, 250, (saved) => {
+      if (sequence === saveSequence.current) setSaving(false);
+      const message = '無法保存會議紀錄，請檢查瀏覽器儲存空間。';
+      setError((error) => (saved ? (error === message ? '' : error) : message));
+    });
   }
 
   async function copyContent() {
@@ -315,6 +331,7 @@ export const MinutesStudio = memo(function MinutesStudio({
                 onChange={(e) => {
                   const record = records.find((item) => item.id === e.target.value);
                   if (record) {
+                    void flushEdits();
                     setActive(record.id);
                     setContent(record.markdownContent);
                     setNotice('');

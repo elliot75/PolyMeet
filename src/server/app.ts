@@ -13,7 +13,18 @@ import {
   transcriptSchema,
 } from './providers/transcription';
 import { isAllowedOrigin } from './origin';
-import { convertMarkdown, languageInstruction, scriptConverter } from './language';
+import { languageInstruction, scriptConverter, streamConvertedText } from './language';
+
+function providerErrorStatus(error: unknown): number {
+  return typeof error === 'object' && error !== null && 'status' in error
+    ? Number(error.status)
+    : 0;
+}
+
+function isAuthError(error: unknown): boolean {
+  const status = providerErrorStatus(error);
+  return status === 401 || status === 403;
+}
 
 export const app = new Hono();
 app.use('*', async (c, next) => {
@@ -50,15 +61,16 @@ app.get('/api/models', async (c) => {
       return c.json({ models: ids.sort() });
     }
     const models = await new GoogleGenAI({ apiKey: key }).models.list({
-      config: { pageSize: 100 },
+      config: { pageSize: 100, abortSignal: c.req.raw.signal },
     });
     const ids: string[] = [];
-    for await (const model of models) if (model.name) ids.push(model.name.replace(/^models\//, ''));
+    for await (const model of models) {
+      if (c.req.raw.signal.aborted) break;
+      if (model.name) ids.push(model.name.replace(/^models\//, ''));
+    }
     return c.json({ models: ids.sort() });
   } catch (error) {
-    const status =
-      typeof error === 'object' && error !== null && 'status' in error ? Number(error.status) : 0;
-    if (status === 401 || status === 403) return c.json({ error: 'auth_failed' }, 401);
+    if (isAuthError(error)) return c.json({ error: 'auth_failed' }, 401);
     return c.json({ error: 'provider_request_failed' }, 502);
   }
 });
@@ -115,10 +127,13 @@ app.post(
               .map((item) => item.trim())
               .filter(Boolean)
           : [targetLanguage];
+    const isBilingualMinutes = targetLanguage === '雙語對照' && selectedLanguages.length >= 2;
+    const effectiveLanguage =
+      targetLanguage === '雙語對照' ? selectedLanguages[0] || '繁體中文' : targetLanguage;
     const instruction =
       (operation === 'translate'
         ? `Translate the current speech between ${sourceLanguage} and ${targetLanguage}. Detect which of the two languages the current speech uses and translate it into the other. Treat prior context only as context. Return only the current speech translation, without commentary.`
-        : `Create accurate meeting minutes ${targetLanguage === '雙語對照' ? `in both selected languages (${selectedLanguages.join(' and ')}), paired for each section even if only one was spoken` : `in ${targetLanguage}`}. ${data.action === 'polish' ? 'Polish and summarize the transcript in the specified output language.' : 'Translate and polish the transcript into the specified output language.'} Style: ${data.style}. Preserve uncertainty, do not invent facts, and use Markdown.`) +
+        : `Create accurate meeting minutes ${isBilingualMinutes ? `in both selected languages (${selectedLanguages.join(' and ')}), paired for each section even if only one was spoken` : `in ${effectiveLanguage}`}. ${data.action === 'polish' ? 'Polish and summarize the transcript in the specified output language.' : 'Translate and polish the transcript into the specified output language.'} Style: ${data.style}. Preserve uncertainty, do not invent facts, and use Markdown.`) +
       ' ' +
       languageInstruction(selectedLanguages);
     const provider = data.provider,
@@ -129,39 +144,45 @@ app.post(
       if (c.req.raw.signal.aborted) controller.abort();
       else c.req.raw.signal.addEventListener('abort', onReqAbort, { once: true });
       stream.onAbort(() => controller.abort());
+      let writeQueue = Promise.resolve();
+      const enqueueWrite = (task: () => Promise<unknown>) => {
+        writeQueue = writeQueue.then(async () => {
+          await task();
+        });
+        return writeQueue;
+      };
+      const keepalive = setInterval(() => {
+        if (!controller.signal.aborted && !stream.aborted && !stream.closed) {
+          void enqueueWrite(() => stream.write(': keepalive\n\n')).catch(() => {});
+        }
+      }, 15_000);
       try {
         const convert = scriptConverter(selectedLanguages);
-        let buffered = '';
-        for await (const text of generateText(
-          provider,
-          key,
-          model,
-          instruction,
-          input,
-          controller.signal,
-        )) {
-          if (convert) buffered += text;
-          else await stream.writeSSE({ event: 'delta', data: JSON.stringify({ text }) });
+        const chunks = generateText(provider, key, model, instruction, input, controller.signal);
+        const output = convert ? streamConvertedText(chunks, convert, operation) : chunks;
+        for await (const text of output) {
+          if (controller.signal.aborted || stream.aborted) return;
+          if (text) {
+            await enqueueWrite(() =>
+              stream.writeSSE({ event: 'delta', data: JSON.stringify({ text }) }),
+            );
+          }
         }
         if (controller.signal.aborted || stream.aborted) return;
-        if (convert && buffered)
-          await stream.writeSSE({
-            event: 'delta',
-            data: JSON.stringify({
-              text:
-                operation === 'minutes' ? convertMarkdown(buffered, convert) : convert(buffered),
-            }),
-          });
-        await stream.writeSSE({ event: 'done', data: '{}' });
+        await enqueueWrite(() => stream.writeSSE({ event: 'done', data: '{}' }));
       } catch {
         if (!controller.signal.aborted && !stream.aborted) {
-          await stream.writeSSE({
-            event: 'error',
-            data: JSON.stringify({ error: 'provider_request_failed' }),
-          });
+          await enqueueWrite(() =>
+            stream.writeSSE({
+              event: 'error',
+              data: JSON.stringify({ error: 'provider_request_failed' }),
+            }),
+          );
         }
       } finally {
+        clearInterval(keepalive);
         c.req.raw.signal.removeEventListener('abort', onReqAbort);
+        await writeQueue.catch(() => {});
       }
     });
   },
@@ -236,6 +257,7 @@ app.post(
       let cleanupWarning = false;
       let segments: ReturnType<typeof parseTimedTranscript> = [];
       let failed = false;
+      let authFailed = false;
       try {
         for (let attempts = 0; uploaded.state === 'PROCESSING' && attempts < 60; attempts++) {
           if (!uploaded.name || c.req.raw.signal.aborted) throw new Error('upload interrupted');
@@ -266,8 +288,9 @@ app.post(
           ...segment,
           text: convert(segment.text, languageCode),
         }));
-      } catch {
+      } catch (error) {
         failed = true;
+        authFailed = isAuthError(error);
       } finally {
         if (uploadedName)
           await client.files.delete({ name: uploadedName }).catch(() => {
@@ -275,9 +298,11 @@ app.post(
           });
         else cleanupWarning = true;
       }
+      if (authFailed) return c.json({ error: 'auth_failed', cleanupWarning }, 401);
       if (failed) return c.json({ error: 'provider_request_failed', cleanupWarning }, 502);
       return c.json({ segments, cleanupWarning });
-    } catch {
+    } catch (error) {
+      if (isAuthError(error)) return c.json({ error: 'auth_failed' }, 401);
       return c.json({ error: 'provider_request_failed' }, 502);
     }
   },

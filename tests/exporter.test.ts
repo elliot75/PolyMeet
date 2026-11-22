@@ -93,7 +93,7 @@ describe('subtitle export', () => {
       filename: '週會-transcript.srt',
       mimeType: 'application/x-subrip',
       content:
-        '1\n00:00:00,600 --> 00:00:01,390\n你好\n&lt;測試&gt;\nHello &amp; welcome\n\n2\n00:00:02,000 --> 00:00:03,000\n再見\n',
+        '1\n00:00:00,600 --> 00:00:01,390\n你好\n<測試>\nHello & welcome\n\n2\n00:00:02,000 --> 00:00:03,000\n再見\n',
     });
     expect(buildTranscriptExport('vtt', segments)).toEqual({
       filename: 'transcript.vtt',
@@ -101,6 +101,12 @@ describe('subtitle export', () => {
       content:
         'WEBVTT\n\n00:00:00.600 --> 00:00:01.390\n你好\n&lt;測試&gt;\nHello &amp; welcome\n\n00:00:02.000 --> 00:00:03.000\n再見\n',
     });
+  });
+
+  it('neutralizes cue arrow markers in SRT without HTML-escaping ampersands', () => {
+    const arrowSegment = { ...segment, text: 'A --> B & C' };
+    expect(buildTranscriptExport('srt', [arrowSegment]).content).toContain('A —> B & C');
+    expect(buildTranscriptExport('vtt', [arrowSegment]).content).toContain('A --&gt; B &amp; C');
   });
 
   it.each(['srt', 'vtt'] as const)('includes the renamed speaker on diarized %s cues', (format) => {
@@ -111,9 +117,39 @@ describe('subtitle export', () => {
       speakerGroup: 'group-1',
       translation: 'First line',
     };
-    expect(buildTranscriptExport(format, [diarized]).content).toContain(
-      'Alice &lt;Lead&gt;：第一句\nFirst line',
-    );
+    const expected =
+      format === 'vtt'
+        ? 'Alice &lt;Lead&gt;：第一句\nFirst line'
+        : 'Alice <Lead>：第一句\nFirst line';
+    expect(buildTranscriptExport(format, [diarized]).content).toContain(expected);
+  });
+
+  it('includes dual-track and custom renamed speakers while keeping default single speakers clean', () => {
+    const dualTrack = [
+      {
+        ...segment,
+        id: '1',
+        track: 'mic' as const,
+        speakerLabel: '我方',
+        startedAtMs: 0,
+        text: '早安',
+      },
+      {
+        ...segment,
+        id: '2',
+        track: 'system' as const,
+        speakerLabel: '對方',
+        startedAtMs: 1200,
+        text: '你好',
+      },
+    ];
+    const dualVtt = buildTranscriptExport('vtt', dualTrack).content;
+    expect(dualVtt).toContain('我方：早安');
+    expect(dualVtt).toContain('對方：你好');
+
+    const renamedSingle = { ...segment, speakerLabel: '王經理' };
+    expect(buildTranscriptExport('srt', [renamedSingle]).content).toContain('王經理：第一句');
+    expect(buildTranscriptExport('srt', [segment]).content).not.toContain('我方：');
   });
 
   it('bounds estimated end times and offsets later recordings by preceding audio duration', () => {
@@ -147,7 +183,9 @@ it('creates a download and releases its temporary object URL', async () => {
     expect(link).toMatchObject({ href: 'blob:test', download: 'minutes.txt' });
     expect(link.click).toHaveBeenCalledOnce();
     expect(await (create.mock.calls[0][0] as Blob).text()).toBe('meeting notes');
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(revoke).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
     expect(revoke).toHaveBeenCalledWith('blob:test');
   } finally {
     create.mockRestore();

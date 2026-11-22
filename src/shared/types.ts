@@ -1,3 +1,5 @@
+export const MAX_SPEAKER_LABEL_LENGTH = 100;
+
 export type ProviderId = 'openai' | 'gemini';
 export type AudioTrackRole = 'mic' | 'system' | 'mixed' | 'upload';
 export type MinutesAction = 'polish' | 'translate_and_polish';

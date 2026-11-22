@@ -23,7 +23,7 @@ function downloadBlob(filename: string, blob: Blob) {
   link.href = url;
   link.download = filename;
   link.click();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 export function downloadMeetingArchive(blob: Blob, title?: string) {
@@ -85,6 +85,8 @@ function subtitleText(text: string): string {
     .join('\n');
 }
 
+const DEFAULT_SINGLE_SPEAKERS = new Set(['我方', '對方', '音檔']);
+
 function buildSubtitles(
   format: SubtitleFormat,
   segments: TranscriptSegment[],
@@ -100,14 +102,26 @@ function buildSubtitles(
   const cues: string[] = [];
   let offset = 0;
   for (const [recordingId, group] of groups) {
+    const distinctSpeakers = new Set(
+      group
+        .map((segment) => subtitleText(segment.speakerLabel).replace(/\n/g, ' '))
+        .filter(Boolean),
+    );
     const sorted = group
-      .map((segment) => ({
-        start: Math.max(0, Math.round(segment.startedAtMs)),
-        end: Math.round(segment.endedAtMs ?? 0),
-        speaker: segment.speakerGroup ? subtitleText(segment.speakerLabel).replace(/\n/g, ' ') : '',
-        text: subtitleText(segment.text),
-        translation: subtitleText(segment.translation ?? ''),
-      }))
+      .map((segment) => {
+        const cleanLabel = subtitleText(segment.speakerLabel).replace(/\n/g, ' ');
+        const includeSpeaker =
+          Boolean(segment.speakerGroup) ||
+          distinctSpeakers.size > 1 ||
+          (Boolean(cleanLabel) && !DEFAULT_SINGLE_SPEAKERS.has(cleanLabel));
+        return {
+          start: Math.max(0, Math.round(segment.startedAtMs)),
+          end: Math.round(segment.endedAtMs ?? 0),
+          speaker: includeSpeaker ? cleanLabel : '',
+          text: subtitleText(segment.text),
+          translation: subtitleText(segment.translation ?? ''),
+        };
+      })
       .filter((cue) => Number.isFinite(cue.start) && (cue.text || cue.translation))
       .sort((a, b) => a.start - b.start);
     let groupEnd = 0;
@@ -124,10 +138,11 @@ function buildSubtitles(
           : Math.min(cue.start + estimatedDuration, sorted[next]?.start ?? Infinity);
       const timing = `${formatSubtitleTimestamp(offset + cue.start, format)} --> ${formatSubtitleTimestamp(offset + end, format)}`;
       const lines = [cue.text, cue.translation].filter(Boolean).join('\n');
-      const content = (cue.speaker ? `${cue.speaker}：${lines}` : lines)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
+      const rawContent = cue.speaker ? `${cue.speaker}：${lines}` : lines;
+      const content =
+        format === 'vtt'
+          ? rawContent.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+          : rawContent.replace(/-->/g, '—>');
       cues.push(
         format === 'srt' ? `${cues.length + 1}\n${timing}\n${content}` : `${timing}\n${content}`,
       );

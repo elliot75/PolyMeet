@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { SttServerEvent, SttStart } from '../../shared/protocol';
+import { usesManualCommit } from '../../shared/models';
 import { scriptConverter } from '../language';
 
 export function openAiConfiguration(start: SttStart) {
@@ -22,12 +23,9 @@ export function openAiConfiguration(start: SttStart) {
                 }
               : {}),
           },
-          turn_detection:
-            start.model === 'gpt-live-transcribe' ||
-            start.model === 'gpt-transcribe' ||
-            start.model === 'gpt-realtime-whisper'
-              ? null
-              : { type: 'server_vad' },
+          turn_detection: usesManualCommit(start.provider, start.model)
+            ? null
+            : { type: 'server_vad' },
         },
       },
     },
@@ -97,7 +95,7 @@ export function createEventMapper(start: SttStart) {
         const id = String(data.item_id || 'current');
         partial.delete(id);
         events.push(
-          { type: 'transcript.final', segmentId: id, text: '', track: start.track },
+          { type: 'transcript.final', segmentId: id, text: '', track: start.track, failed: true },
           {
             type: 'error',
             code: 'transcript_failed',
@@ -126,10 +124,16 @@ export function createEventMapper(start: SttStart) {
           track: start.track,
         });
       if (typeof final === 'string' && final) {
+        const offset = data.serverContent.inputTranscription.endOffset;
+        const seconds =
+          typeof offset === 'string' && /^\d+(?:\.\d+)?s$/.test(offset)
+            ? Number(offset.slice(0, -1))
+            : NaN;
         events.push({
           type: 'transcript.final',
           segmentId: geminiId,
           text: convert(final, data.serverContent.inputTranscription.languageCode),
+          ...(Number.isFinite(seconds) && seconds > 0 ? { audioEndMs: seconds * 1000 } : {}),
           track: start.track,
         });
         geminiId = randomUUID();

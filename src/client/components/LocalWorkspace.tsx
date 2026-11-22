@@ -1,7 +1,7 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState, type HTMLAttributes } from 'react';
 import { exportMeetingArchive, importMeetingArchive, type Meeting } from '../db/meetingDb';
 import { downloadMeetingArchive } from '../services/exporter';
-import { closeDialogAnimated, openDialogModal } from '../utils/dialog';
+import { closeDialogAnimated, isPointerOutsideDialog, openDialogModal } from '../utils/dialog';
 import { IconX } from './Icons';
 
 function formatBytes(bytes: number) {
@@ -24,12 +24,13 @@ export function LocalWorkspace({
   selectedMeeting?: Meeting;
   meetingCount: number;
   locked: boolean;
-  onBeforeExport: () => Promise<void>;
+  onBeforeExport: (meetingId?: string) => Promise<boolean>;
   onImported: (meetings: Meeting[]) => void;
 }) {
   const titleId = useId();
   const dialog = useRef<HTMLDialogElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const pressedOutside = useRef(false);
   const [space, setSpace] = useState('正在估算…');
   const [scope, setScope] = useState<'workspace' | 'meeting'>('workspace');
   const [includeAudio, setIncludeAudio] = useState(false);
@@ -77,8 +78,9 @@ export function LocalWorkspace({
     setOperation(action);
     try {
       if (action === 'export') {
-        await onBeforeExport();
         const meeting = scope === 'meeting' ? selectedMeeting : undefined;
+        const flushed = await onBeforeExport(meeting?.id);
+        if (!flushed) throw new Error('部分編輯尚未成功儲存，已取消匯出備份。');
         const blob = await exportMeetingArchive({ meetingId: meeting?.id, includeAudio });
         downloadMeetingArchive(blob, meeting?.title);
         setStatus('已產生備份檔案。');
@@ -121,9 +123,27 @@ export function LocalWorkspace({
         ref={dialog}
         className="archive-dialog"
         aria-labelledby={titleId}
+        {...({ closedby: operation ? 'none' : 'any' } as HTMLAttributes<HTMLDialogElement>)}
         onCancel={(event) => {
           event.preventDefault();
           if (!operation) void closeDialogAnimated(dialog.current);
+        }}
+        onPointerDown={(event) => {
+          if (!operation && !('closedBy' in HTMLDialogElement.prototype) && dialog.current) {
+            pressedOutside.current = isPointerOutsideDialog(event, dialog.current);
+          }
+        }}
+        onPointerUp={(event) => {
+          if (
+            !operation &&
+            !('closedBy' in HTMLDialogElement.prototype) &&
+            pressedOutside.current &&
+            dialog.current &&
+            isPointerOutsideDialog(event, dialog.current)
+          ) {
+            void closeDialogAnimated(dialog.current);
+          }
+          pressedOutside.current = false;
         }}
       >
         <div className="dialog-header">
