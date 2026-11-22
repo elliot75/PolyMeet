@@ -86,7 +86,7 @@ export class LiveCapture {
         this.onEvent?.({
           type: 'error',
           code: 'audio_unsent',
-          message: '部分音訊尚未轉錄；可下載本機錄音後上傳補轉。',
+          message: '部分音訊尚未轉錄，錄音保存後可使用「轉錄此錄音」。',
           recoverable: true,
         });
       const finalized = await Promise.all(this.clients.map((client) => client.waitForFinal()));
@@ -94,7 +94,7 @@ export class LiveCapture {
         this.onEvent?.({
           type: 'error',
           code: 'audio_unsent',
-          message: '最後一段逐字稿尚未完成；可下載本機錄音後上傳補轉。',
+          message: '最後一段逐字稿尚未完成，錄音保存後可使用「轉錄此錄音」。',
           recoverable: true,
         });
     } finally {

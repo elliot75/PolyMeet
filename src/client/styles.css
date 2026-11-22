@@ -397,6 +397,11 @@ li {
   margin-top: 2px;
 }
 
+.meeting .meeting-search-match {
+  color: var(--brand);
+  overflow-wrap: anywhere;
+}
+
 .sidebar-empty {
   text-align: center;
   padding: 24px 10px;
@@ -423,7 +428,12 @@ li {
   font-size: 11px;
 }
 
+.local-workspace-info .small-button {
+  margin-top: 6px;
+}
+
 .avatar {
+  flex: none;
   background: var(--brand-soft);
   color: var(--brand);
   border-radius: 50%;
@@ -876,7 +886,7 @@ main {
 .control-block select,
 .minutes select,
 .minutes input,
-dialog input:not([type='checkbox']),
+dialog input:not([type='checkbox'], [type='radio']),
 dialog select {
   width: 100%;
   background: var(--elevated);
@@ -1181,6 +1191,8 @@ dialog select {
 }
 
 .segment-badge {
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
   font-size: 11.5px;
   font-weight: 700;
   padding: 2px 9px;
@@ -1200,6 +1212,22 @@ dialog select {
 .segment-badge.upload {
   background: var(--soft);
   color: var(--ink-secondary);
+}
+
+.speaker-rename {
+  min-block-size: 26px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 2px 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.speaker-rename:hover:not(:disabled) {
+  border-color: var(--line);
+  background: var(--soft);
+  color: var(--ink);
 }
 
 .seek {
@@ -1681,6 +1709,99 @@ dialog.confirm-dialog {
 
 dialog.upload-dialog {
   max-width: min(520px, calc(100% - 32px));
+}
+
+.recording-filename {
+  overflow-wrap: anywhere;
+  font-weight: 650;
+}
+
+.recording-transcript-options {
+  display: grid;
+  gap: 10px;
+  min-inline-size: 0;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.recording-transcript-options label {
+  display: flex;
+  align-items: start;
+  gap: 8px;
+}
+
+.recording-transcript-options input {
+  flex: none;
+  margin-block-start: 4px;
+}
+
+dialog.speaker-dialog {
+  max-width: min(440px, calc(100% - 32px));
+}
+
+.speaker-form {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.speaker-form > input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--elevated);
+  color: var(--ink);
+  font-size: 16px;
+}
+
+.speaker-scope {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-block-size: 44px;
+  cursor: pointer;
+}
+
+.speaker-scope input {
+  flex: none;
+}
+
+dialog.archive-dialog {
+  max-width: min(440px, calc(100% - 32px));
+}
+
+.archive-section {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+  padding-top: 16px;
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.archive-section h3,
+.archive-section p {
+  margin: 0;
+}
+
+.archive-scope,
+.archive-audio,
+.archive-file-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.archive-filename {
+  overflow-wrap: anywhere;
+  min-width: 0;
+  max-width: 100%;
 }
 
 @media (prefers-reduced-motion: no-preference) {

@@ -2,12 +2,19 @@ export type ProviderId = 'openai' | 'gemini';
 export type AudioTrackRole = 'mic' | 'system' | 'mixed' | 'upload';
 export type MinutesAction = 'polish' | 'translate_and_polish';
 export type MinutesStyle = 'standard' | 'action_items' | 'detailed';
+export interface FileTranscriptSegment {
+  startSeconds: number;
+  endSeconds: number;
+  text: string;
+  speaker?: string;
+}
 export interface TranscriptSegment {
   id: string;
   meetingId: string;
   recordingId?: string;
   track: AudioTrackRole;
   speakerLabel: string;
+  speakerGroup?: string;
   startedAtMs: number;
   timeIsChunkStart?: boolean;
   endedAtMs?: number;

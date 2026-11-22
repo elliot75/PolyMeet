@@ -5,6 +5,7 @@ import {
   saveMeeting,
   saveSegment,
   updateSegmentTranslation,
+  updateSegmentText,
 } from '../src/client/db/meetingDb';
 
 describe('translation persistence', () => {
@@ -35,6 +36,16 @@ describe('translation persistence', () => {
     await updateSegmentTranslation(segment.id, 'late draft', false);
     expect(await listSegments(segment.meetingId)).toMatchObject([
       { text: 'corrected', translation: 'translated', translationIsFinal: true },
+    ]);
+
+    await updateSegmentText(segment.id, 'edited again');
+    expect(await updateSegmentTranslation(segment.id, 'stale', true, 'corrected')).toBe(false);
+    expect(await listSegments(segment.meetingId)).toMatchObject([
+      { text: 'edited again', translation: undefined, translationIsFinal: undefined },
+    ]);
+    expect(await updateSegmentTranslation(segment.id, 'fresh', true, 'edited again')).toBe(true);
+    expect(await listSegments(segment.meetingId)).toMatchObject([
+      { text: 'edited again', translation: 'fresh', translationIsFinal: true },
     ]);
   });
 });

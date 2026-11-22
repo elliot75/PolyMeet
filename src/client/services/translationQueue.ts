@@ -2,29 +2,42 @@ import type { TranscriptSegment } from '../../shared/types';
 import { streamText } from './apiClient';
 import type { Settings } from './settings';
 
+export function needsTranslation(segment: TranscriptSegment) {
+  return (
+    segment.isFinal &&
+    !!segment.text.trim() &&
+    (!segment.translation?.trim() || segment.translationIsFinal === false)
+  );
+}
+
 export class TranslationQueue {
   private queue: Promise<void> = Promise.resolve();
-  private context: string[] = [];
+  private context: Pick<TranscriptSegment, 'id' | 'text'>[] = [];
   private aborted = false;
-  private currentController?: AbortController;
+  private jobs = new Map<string, AbortController>();
 
   constructor(
     private settings: Settings,
     private sourceLanguage: string,
     private targetLanguage: string,
-    private onUpdate: (segment: TranscriptSegment, text: string, final: boolean) => void,
+    private onUpdate: (
+      segment: TranscriptSegment,
+      text: string,
+      final: boolean,
+      signal: AbortSignal,
+    ) => void | Promise<void>,
     private onError: () => void,
   ) {}
 
-  add(segment: TranscriptSegment) {
-    if (this.aborted) return;
-    const context = this.context.slice(-4).join('\n');
-    this.context.push(segment.text);
-    if (this.context.length > 4) this.context.shift();
-    this.queue = this.queue.then(async () => {
-      if (this.aborted) return;
-      const controller = new AbortController();
-      this.currentController = controller;
+  add(segment: TranscriptSegment): Promise<void> | undefined {
+    if (this.aborted || this.jobs.has(segment.id)) return;
+    const controller = new AbortController();
+    this.jobs.set(segment.id, controller);
+    return (this.queue = this.queue.then(async () => {
+      if (controller.signal.aborted) return;
+      const prior = this.context.filter((item) => item.id !== segment.id);
+      const context = prior.map((item) => item.text).join('\n');
+      this.context = [...prior, { id: segment.id, text: segment.text }].slice(-4);
       let translated = '';
       const options = {
         ...this.settings,
@@ -42,25 +55,28 @@ export class TranslationQueue {
             targetLanguage: this.targetLanguage,
           },
           (chunk) => {
-            if (this.aborted || controller.signal.aborted) return;
+            if (controller.signal.aborted) return;
             translated += chunk;
-            this.onUpdate(segment, translated, false);
+            void this.onUpdate(segment, translated, false, controller.signal);
           },
           controller.signal,
         );
-        if (!this.aborted && !controller.signal.aborted) {
-          this.onUpdate(segment, translated, true);
+        if (!controller.signal.aborted) {
+          if (!translated.trim()) throw new Error('Empty translation');
+          await this.onUpdate(segment, translated, true, controller.signal);
         }
       } catch {
-        if (!this.aborted && !controller.signal.aborted) {
-          this.onError();
-        }
+        if (!controller.signal.aborted) this.onError();
       } finally {
-        if (this.currentController === controller) {
-          this.currentController = undefined;
-        }
+        if (this.jobs.get(segment.id) === controller) this.jobs.delete(segment.id);
       }
-    });
+    }));
+  }
+
+  remove(id: string) {
+    this.jobs.get(id)?.abort();
+    this.jobs.delete(id);
+    this.context = this.context.filter((item) => item.id !== id);
   }
 
   async finish(timeoutMs: number) {
@@ -80,6 +96,7 @@ export class TranslationQueue {
 
   cancel() {
     this.aborted = true;
-    this.currentController?.abort();
+    for (const controller of this.jobs.values()) controller.abort();
+    this.jobs.clear();
   }
 }

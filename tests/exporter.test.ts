@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { buildMinutesExport, buildTranscriptExport } from '../src/client/services/exporter';
+import {
+  buildMinutesExport,
+  buildTranscriptExport,
+  formatSubtitleTimestamp,
+} from '../src/client/services/exporter';
+import type { TranscriptSegment } from '../src/shared/types';
 
 const metadata = {
   id: 'version-1',
@@ -52,6 +57,79 @@ describe('minutes export', () => {
     const txt = buildTranscriptExport('txt', segments, '週會');
     expect(txt.content).toContain('[1:05] 我方: 早安');
     expect(txt.content).toContain('譯文: Good morning');
+  });
+});
+
+describe('subtitle export', () => {
+  const segment: TranscriptSegment = {
+    id: 'cue',
+    meetingId: 'meeting-1',
+    recordingId: 'clip-a',
+    track: 'mic',
+    speakerLabel: '我方',
+    startedAtMs: 0,
+    text: '第一句',
+    isFinal: true,
+  };
+
+  it('formats hours, minutes, seconds, and milliseconds with the correct separator', () => {
+    expect(formatSubtitleTimestamp(3_661_042, 'srt')).toBe('01:01:01,042');
+    expect(formatSubtitleTimestamp(59_999.7, 'vtt')).toBe('00:01:00.000');
+    expect(formatSubtitleTimestamp(-1, 'vtt')).toBe('00:00:00.000');
+  });
+
+  it('exports original and translated lines in both subtitle formats', () => {
+    const segments = [
+      {
+        ...segment,
+        startedAtMs: 600,
+        text: '你好\n\n<測試>',
+        translation: 'Hello & welcome',
+        endedAtMs: 1390,
+      },
+      { ...segment, id: 'cue-2', startedAtMs: 2000, text: '再見' },
+    ];
+    expect(buildTranscriptExport('srt', segments, '週會')).toEqual({
+      filename: '週會-transcript.srt',
+      mimeType: 'application/x-subrip',
+      content:
+        '1\n00:00:00,600 --> 00:00:01,390\n你好\n&lt;測試&gt;\nHello &amp; welcome\n\n2\n00:00:02,000 --> 00:00:03,000\n再見\n',
+    });
+    expect(buildTranscriptExport('vtt', segments)).toEqual({
+      filename: 'transcript.vtt',
+      mimeType: 'text/vtt',
+      content:
+        'WEBVTT\n\n00:00:00.600 --> 00:00:01.390\n你好\n&lt;測試&gt;\nHello &amp; welcome\n\n00:00:02.000 --> 00:00:03.000\n再見\n',
+    });
+  });
+
+  it.each(['srt', 'vtt'] as const)('includes the renamed speaker on diarized %s cues', (format) => {
+    const diarized = {
+      ...segment,
+      track: 'upload' as const,
+      speakerLabel: 'Alice <Lead>',
+      speakerGroup: 'group-1',
+      translation: 'First line',
+    };
+    expect(buildTranscriptExport(format, [diarized]).content).toContain(
+      'Alice &lt;Lead&gt;：第一句\nFirst line',
+    );
+  });
+
+  it('bounds estimated end times and offsets later recordings by preceding audio duration', () => {
+    const segments = [
+      { ...segment, startedAtMs: 200 },
+      { ...segment, id: 'cue-2', startedAtMs: 410, text: '字'.repeat(120), endedAtMs: 100 },
+      { ...segment, id: 'cue-3', recordingId: 'clip-b', endedAtMs: 950 },
+    ];
+    const vtt = buildTranscriptExport('vtt', segments, undefined, [
+      { id: 'clip-a', durationSeconds: 8 },
+    ]);
+    expect(vtt.content.match(/.* --> .*/g)).toEqual([
+      '00:00:00.200 --> 00:00:00.410',
+      '00:00:00.410 --> 00:00:06.410',
+      '00:00:08.000 --> 00:00:08.950',
+    ]);
   });
 });
 
