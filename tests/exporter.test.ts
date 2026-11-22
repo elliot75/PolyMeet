@@ -103,6 +103,19 @@ describe('subtitle export', () => {
     });
   });
 
+  it.each(['srt', 'vtt'] as const)('includes the renamed speaker on diarized %s cues', (format) => {
+    const diarized = {
+      ...segment,
+      track: 'upload' as const,
+      speakerLabel: 'Alice <Lead>',
+      speakerGroup: 'group-1',
+      translation: 'First line',
+    };
+    expect(buildTranscriptExport(format, [diarized]).content).toContain(
+      'Alice &lt;Lead&gt;：第一句\nFirst line',
+    );
+  });
+
   it('bounds estimated end times and offsets later recordings by preceding audio duration', () => {
     const segments = [
       { ...segment, startedAtMs: 200 },

@@ -15,11 +15,14 @@ export function uploadedSegments(
   const text = result.text?.trim();
   const items: (Omit<FileTranscriptSegment, 'endSeconds'> & { endSeconds?: number })[] =
     timed ?? (text ? [{ text, startSeconds: 0 }] : []);
+  // A provider's speaker labels only identify people within this one response.
+  const speakerGroup = items.some((item) => item.speaker) ? crypto.randomUUID() : undefined;
   return items.map((item) => ({
     id: crypto.randomUUID(),
     meetingId: recording.meetingId,
     recordingId: recording.id,
     track: 'upload',
+    ...(item.speaker && { speakerGroup }),
     // Independent requests can assign the same anonymous label to different people.
     speakerLabel: item.speaker
       ? part.total > 1

@@ -98,6 +98,29 @@ describe('file and saved recording transcription', () => {
     expect(options.onPartComplete).toHaveBeenCalledWith(1, false);
   });
 
+  it('never bulk-renames the same provider label from a different transcription response', async () => {
+    const { recording, options } = await setup();
+    vi.stubGlobal('fetch', async () =>
+      Response.json({
+        segments: [
+          { text: 'first', startSeconds: 0, endSeconds: 1, speaker: '語者 A' },
+          { text: 'second', startSeconds: 1, endSeconds: 2, speaker: '語者 A' },
+        ],
+      }),
+    );
+    const initial = await transcribeSavedRecording(options);
+    const appended = await transcribeSavedRecording(options);
+
+    expect(new Set(await renameSegmentSpeaker(appended[0], 'Alice', 'speaker'))).toEqual(
+      new Set(appended.map(({ id }) => id)),
+    );
+    const labels = new Map(
+      (await listSegments(recording.meetingId)).map((s) => [s.id, s.speakerLabel]),
+    );
+    expect(initial.map((s) => labels.get(s.id))).toEqual(['語者 A', '語者 A']);
+    expect(appended.map((s) => labels.get(s.id))).toEqual(['Alice', 'Alice']);
+  });
+
   it('replaces only the selected recording’s transcript once new speech is saved', async () => {
     const { recording, previous, options } = await setup();
     const otherRecording = { ...recording, id: crypto.randomUUID(), createdAt: 3 };

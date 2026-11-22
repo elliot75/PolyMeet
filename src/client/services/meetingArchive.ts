@@ -100,6 +100,7 @@ function isSegment(value: unknown): value is TranscriptSegment {
       value.track === 'mixed' ||
       value.track === 'upload') &&
     typeof value.speakerLabel === 'string' &&
+    (value.speakerGroup === undefined || isId(value.speakerGroup)) &&
     isNonnegative(value.startedAtMs) &&
     (value.endedAtMs === undefined || isNonnegative(value.endedAtMs)) &&
     isOptionalBoolean(value.timeIsChunkStart) &&

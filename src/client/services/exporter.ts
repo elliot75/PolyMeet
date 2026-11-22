@@ -104,6 +104,7 @@ function buildSubtitles(
       .map((segment) => ({
         start: Math.max(0, Math.round(segment.startedAtMs)),
         end: Math.round(segment.endedAtMs ?? 0),
+        speaker: segment.speakerGroup ? subtitleText(segment.speakerLabel).replace(/\n/g, ' ') : '',
         text: subtitleText(segment.text),
         translation: subtitleText(segment.translation ?? ''),
       }))
@@ -122,9 +123,8 @@ function buildSubtitles(
           ? cue.end
           : Math.min(cue.start + estimatedDuration, sorted[next]?.start ?? Infinity);
       const timing = `${formatSubtitleTimestamp(offset + cue.start, format)} --> ${formatSubtitleTimestamp(offset + end, format)}`;
-      const content = [cue.text, cue.translation]
-        .filter(Boolean)
-        .join('\n')
+      const lines = [cue.text, cue.translation].filter(Boolean).join('\n');
+      const content = (cue.speaker ? `${cue.speaker}：${lines}` : lines)
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');

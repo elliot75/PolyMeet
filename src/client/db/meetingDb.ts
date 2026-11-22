@@ -451,7 +451,9 @@ export async function renameSegmentSpeaker(
       ? [current]
       : (await tx.store.index('by-meeting').getAll(current.meetingId)).filter(
           (item) =>
-            item.recordingId === current.recordingId && item.speakerLabel === current.speakerLabel,
+            item.recordingId === current.recordingId &&
+            item.speakerGroup === current.speakerGroup &&
+            item.speakerLabel === current.speakerLabel,
         );
   await Promise.all([tx.done, ...matches.map((item) => tx.store.put({ ...item, speakerLabel }))]);
   return matches.map((item) => item.id);

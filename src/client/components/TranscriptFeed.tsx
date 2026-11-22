@@ -630,9 +630,11 @@ export const TranscriptFeed = memo(function TranscriptFeed({
               onChange={(event) => setRenameAll(event.target.checked)}
             />
             <span>
-              {renameTarget?.recordingId
-                ? '一併更名此錄音中具有相同語者標籤的段落'
-                : '一併更名此會議中未連結錄音、且語者標籤相同的段落'}
+              {renameTarget?.speakerGroup
+                ? '一併更名同一批轉錄中語者標籤相同的段落'
+                : renameTarget?.recordingId
+                  ? '一併更名此錄音中具有相同語者標籤的段落'
+                  : '一併更名此會議中未連結錄音、且語者標籤相同的段落'}
             </span>
           </label>
           {renameError && (

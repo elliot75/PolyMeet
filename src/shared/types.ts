@@ -14,6 +14,7 @@ export interface TranscriptSegment {
   recordingId?: string;
   track: AudioTrackRole;
   speakerLabel: string;
+  speakerGroup?: string;
   startedAtMs: number;
   timeIsChunkStart?: boolean;
   endedAtMs?: number;
