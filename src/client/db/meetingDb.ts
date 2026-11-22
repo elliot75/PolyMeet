@@ -164,6 +164,59 @@ export async function saveSegments(
     throw error;
   }
 }
+export async function saveRecordingSegments(
+  recording: Recording,
+  segments: TranscriptSegment[],
+  previous?: TranscriptSegment[],
+  signal?: AbortSignal,
+): Promise<void> {
+  signal?.throwIfAborted();
+  if (!segments.length) return;
+  const database = await db();
+  signal?.throwIfAborted();
+  const tx = database.transaction(['recordings', 'segments'], 'readwrite');
+  const store = tx.objectStore('segments');
+  const abort = () => {
+    try {
+      tx.abort();
+    } catch {
+      // The transaction may have already finished.
+    }
+  };
+  signal?.addEventListener('abort', abort, { once: true });
+  try {
+    const saved = await tx.objectStore('recordings').get(recording.id);
+    if (saved?.meetingId !== recording.meetingId)
+      throw new Error('此錄音已不存在，請重新開啟會議。');
+    if (previous) {
+      const current = (await store.index('by-meeting').getAll(recording.meetingId)).filter(
+        (segment) => segment.recordingId === recording.id,
+      );
+      const expected = new Map(previous.map((segment) => [segment.id, segment]));
+      if (
+        current.length !== previous.length ||
+        current.some((segment) => {
+          const snapshot = expected.get(segment.id);
+          return snapshot?.text !== segment.text || snapshot?.isFinal !== segment.isFinal;
+        })
+      ) {
+        throw new Error('此錄音的逐字稿已有變更，請關閉視窗後重新確認。');
+      }
+    }
+    await Promise.all([
+      tx.done,
+      ...(previous ?? []).map(async (segment) => store.delete(segment.id)),
+      ...segments.map(async (segment) => store.add(segment)),
+    ]);
+  } catch (error) {
+    abort();
+    await tx.done.catch(() => {});
+    throw error;
+  } finally {
+    signal?.removeEventListener('abort', abort);
+  }
+}
+
 export async function saveInterimSegment(segment: TranscriptSegment): Promise<void> {
   const tx = (await db()).transaction(['recordings', 'segments'], 'readwrite');
   const store = tx.objectStore('segments');
@@ -194,20 +247,28 @@ export async function updateSegmentTranslation(
   id: string,
   translation: string,
   isFinal = true,
-): Promise<void> {
+  expectedText?: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
   const database = await db();
   const tx = database.transaction('segments', 'readwrite');
   const segment = await tx.store.get(id);
-  if (segment && (isFinal || !segment.translation || segment.translationIsFinal === false))
-    await tx.store.put({ ...segment, translation, translationIsFinal: isFinal });
+  const canUpdate =
+    !!segment &&
+    !signal?.aborted &&
+    (expectedText === undefined || segment.text === expectedText) &&
+    (isFinal || !segment.translation || segment.translationIsFinal === false);
+  if (canUpdate) await tx.store.put({ ...segment, translation, translationIsFinal: isFinal });
   await tx.done;
+  return canUpdate;
 }
 
 export async function updateSegmentText(id: string, text: string): Promise<void> {
   const database = await db();
   const tx = database.transaction('segments', 'readwrite');
   const segment = await tx.store.get(id);
-  if (segment) await tx.store.put({ ...segment, text });
+  if (segment && segment.text !== text)
+    await tx.store.put({ ...segment, text, translation: undefined, translationIsFinal: undefined });
   await tx.done;
 }
 

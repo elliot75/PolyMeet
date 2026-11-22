@@ -3,8 +3,10 @@ import { SettingsDialog, type ServerHealth } from './components/SettingsDialog';
 import { MinutesStudio } from './components/MinutesStudio';
 import { TranscriptFeed } from './components/TranscriptFeed';
 import { LiveCapture } from './audio/liveCapture';
+import { startLocalAudioMeter, type AudioLevels } from './audio/localAudioMeter';
 import { SegmentTimeline } from './audio/segmentTimeline';
-import { TranslationQueue } from './services/translationQueue';
+import { recordingFilename } from './services/fileTranscription';
+import { needsTranslation, TranslationQueue } from './services/translationQueue';
 import { ProjectionOverlay } from './components/ProjectionOverlay';
 import { DeleteMeetingDialog } from './components/DeleteMeetingDialog';
 import { formatTimestamp } from './services/exporter';
@@ -44,7 +46,6 @@ import {
   IconX,
 } from './components/Icons';
 
-type AudioLevels = { mic: number; system: number };
 type LevelSubscriber = (levels: AudioLevels) => void;
 
 const AUDIO_SLICE_MS = 1000;
@@ -131,7 +132,15 @@ const AudioMeters = memo(function AudioMeters({
   );
 });
 
-const RecordingPlayer = memo(function RecordingPlayer({ recording }: { recording: Recording }) {
+const RecordingPlayer = memo(function RecordingPlayer({
+  recording,
+  disabled,
+  onTranscribe,
+}: {
+  recording: Recording;
+  disabled: boolean;
+  onTranscribe: (recording: Recording) => void;
+}) {
   const [url, setUrl] = useState('');
   useEffect(() => {
     let active = true;
@@ -149,20 +158,6 @@ const RecordingPlayer = memo(function RecordingPlayer({ recording }: { recording
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [recording.id, recording.completed, recording.mimeType]);
-
-  const extension = recording.mimeType.includes('mp4')
-    ? 'm4a'
-    : recording.mimeType.includes('ogg')
-      ? 'ogg'
-      : recording.mimeType.includes('mpeg')
-        ? 'mp3'
-        : recording.mimeType.includes('wav')
-          ? 'wav'
-          : recording.mimeType.includes('flac')
-            ? 'flac'
-            : recording.mimeType.includes('aac')
-              ? 'aac'
-              : 'webm';
 
   return (
     <div className="audio">
@@ -182,11 +177,20 @@ const RecordingPlayer = memo(function RecordingPlayer({ recording }: { recording
           <a
             className="secondary small-button audio-download"
             href={url}
-            download={recording.filename || `polymeet-${recording.createdAt}.${extension}`}
+            download={recordingFilename(recording)}
           >
             <IconDownload size={14} />
             <span>下載音檔</span>
           </a>
+          <button
+            type="button"
+            className="secondary small-button"
+            disabled={disabled}
+            onClick={() => onTranscribe(recording)}
+          >
+            <IconFileText size={14} />
+            <span>轉錄此錄音</span>
+          </button>
         </div>
       ) : (
         <small>沒有可播放的錄音片段</small>
@@ -220,7 +224,9 @@ export function App() {
   );
   const [error, setError] = useState('');
   const [recordings, setRecordings] = useState<Recording[]>([]);
+  const [recordingToTranscribe, setRecordingToTranscribe] = useState<Recording | null>(null);
   const [segments, setSegments] = useState<TranscriptSegment[]>([]);
+  const [translating, setTranslating] = useState(new Map<string, Promise<void>>());
 
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selected;
@@ -232,8 +238,11 @@ export function App() {
   const allowSavedReload = useRef(false);
   const streams = useRef<MediaStream[]>([]);
   const liveCapture = useRef<LiveCapture | null>(null);
+  const stopLocalMeter = useRef<(() => void) | undefined>(undefined);
   const mixContext = useRef<AudioContext | null>(null);
   const translationQueueRef = useRef<TranslationQueue | null>(null);
+  const translationWrites = useRef(new Set<Promise<boolean>>());
+  const translationSaveFailed = useRef(false);
   const saveQueue = useRef<Promise<void>>(Promise.resolve());
   const pendingSavesRef = useRef(new Map<string, Meeting>());
   const saveTimerRef = useRef<number | undefined>(undefined);
@@ -245,7 +254,87 @@ export function App() {
   const wasDrawerOpenRef = useRef(false);
 
   const meeting = meetings.find((m) => m.id === selected);
+  const isBilingual = meeting?.mode === '雙語會議';
+  const sourceLanguage = meeting?.sourceLang || '繁體中文';
+  const targetLanguage = meeting?.targetLang || 'English';
   const workspaceLocked = recording || busy || uploading || generating;
+
+  const handleTranslate = useCallback(
+    (items: TranscriptSegment[]) => {
+      if (!isBilingual || !selected || selectedRef.current !== selected || !items.length) return;
+      if (sourceLanguage === targetLanguage) {
+        setTranslationStatus('請選擇兩種不同的語言。');
+        return;
+      }
+      setTranslationStatus('');
+      const queue: TranslationQueue = (translationQueueRef.current ??= new TranslationQueue(
+        settings,
+        sourceLanguage,
+        targetLanguage,
+        async (segment, text, final, signal) => {
+          if (!text.trim()) return;
+          const write = updateSegmentTranslation(segment.id, text, final, segment.text, signal);
+          translationWrites.current.add(write);
+          try {
+            const saved = await write;
+            if (
+              saved &&
+              !signal.aborted &&
+              selectedRef.current === segment.meetingId &&
+              translationQueueRef.current === queue
+            ) {
+              setSegments((old) =>
+                old.map((item) =>
+                  item.id === segment.id && item.text === segment.text
+                    ? { ...item, translation: text, translationIsFinal: final }
+                    : item,
+                ),
+              );
+            }
+          } catch {
+            if (translationQueueRef.current === queue) {
+              translationSaveFailed.current = true;
+              setTranslationStatus('無法保存譯文，請檢查瀏覽器儲存空間。');
+            }
+          } finally {
+            translationWrites.current.delete(write);
+          }
+        },
+        () => {
+          if (selectedRef.current === selected)
+            setTranslationStatus('翻譯失敗，請檢查翻譯模型和金鑰。');
+        },
+      ));
+      const jobs = new Map<string, Promise<void>>();
+      for (const segment of items) {
+        if (!segment.isFinal || !segment.text.trim() || segment.meetingId !== selected) continue;
+        const job = queue.add(segment);
+        if (!job) continue;
+        jobs.set(segment.id, job);
+        void job.then(() => {
+          setTranslating((old) => {
+            if (old.get(segment.id) !== job) return old;
+            const next = new Map(old);
+            next.delete(segment.id);
+            return next;
+          });
+        });
+      }
+      if (jobs.size) setTranslating((old) => new Map([...old, ...jobs]));
+    },
+    [isBilingual, selected, settings, sourceLanguage, targetLanguage],
+  );
+  const enqueueLiveTranslation = useRef(handleTranslate);
+  enqueueLiveTranslation.current = handleTranslate;
+
+  useEffect(() => {
+    setTranslating(new Map());
+    setTranslationStatus('');
+    return () => {
+      translationQueueRef.current?.cancel();
+      translationQueueRef.current = null;
+    };
+  }, [handleTranslate]);
 
   const subscribeLevels = useCallback((listener: LevelSubscriber) => {
     levelSubscribersRef.current.add(listener);
@@ -331,10 +420,10 @@ export function App() {
   useEffect(() => {
     let active = true;
     setRecordings([]);
+    setRecordingToTranscribe(null);
     setSegments([]);
     setMinutesCount(0);
     setLiveStatus('');
-    setTranslationStatus('');
     setError('');
     if (selected) {
       try {
@@ -371,7 +460,8 @@ export function App() {
       document.removeEventListener('visibilitychange', flushOnHide);
       void flushPendingSaves();
       void liveCapture.current?.stop().catch(() => {});
-      translationQueueRef.current?.cancel();
+      stopLocalMeter.current?.();
+      stopLocalMeter.current = undefined;
       streams.current.forEach((stream) => stream.getTracks().forEach((t) => t.stop()));
       if (mixContext.current?.state !== 'closed') void mixContext.current?.close().catch(() => {});
     };
@@ -502,6 +592,7 @@ export function App() {
     setInterims({});
     setLiveStatus('');
     setTranslationStatus('');
+    translationSaveFailed.current = false;
     publishLevels({ mic: 0, system: 0 });
     let mic: MediaStream | undefined, display: MediaStream | undefined;
     let mixer: AudioContext | undefined, live: LiveCapture | undefined;
@@ -532,6 +623,18 @@ export function App() {
         recordingStream = destination.stream;
       }
       const r = new MediaRecorder(recordingStream);
+      const startMeter = (micStream: MediaStream) => {
+        try {
+          stopLocalMeter.current = startLocalAudioMeter(
+            { mic: micStream, system: display },
+            () => r.state === 'recording',
+            publishLevels,
+            mixer,
+          );
+        } catch {
+          // Metering is optional and must not prevent local recording.
+        }
+      };
       const saved: Recording = {
         id: crypto.randomUUID(),
         meetingId: meeting.id,
@@ -588,32 +691,6 @@ export function App() {
       };
       await saveRecording(saved);
       if (liveEnabled) {
-        const translations =
-          meeting.mode === '雙語會議'
-            ? new TranslationQueue(
-                settings,
-                meeting.sourceLang || '繁體中文',
-                meeting.targetLang || 'English',
-                (segment, text, final) => {
-                  if (selectedRef.current === saved.meetingId)
-                    setSegments((old) =>
-                      old.map((item) =>
-                        item.id === segment.id
-                          ? { ...item, translation: text, translationIsFinal: final }
-                          : item,
-                      ),
-                    );
-                  if (text.trim())
-                    void persistTranscript(updateSegmentTranslation(segment.id, text, final));
-                },
-                () => {
-                  if (selectedRef.current === saved.meetingId)
-                    setTranslationStatus('翻譯失敗，請檢查翻譯模型和金鑰。');
-                },
-              )
-            : null;
-        translationQueueRef.current?.cancel();
-        translationQueueRef.current = translations;
         live = new LiveCapture();
         liveCapture.current = live;
         const provider = settings.liveProvider;
@@ -696,7 +773,7 @@ export function App() {
                           segment,
                         ].sort((a, b) => a.startedAtMs - b.startedAtMs),
                       ]);
-                    translations?.add(segment);
+                    enqueueLiveTranslation.current([segment]);
                   }),
                 );
               }
@@ -711,11 +788,10 @@ export function App() {
             void live?.stop().catch(() => {});
             live = undefined;
             liveCapture.current = null;
-            translations?.cancel();
-            translationQueueRef.current = null;
             setLiveStatus('即時轉錄無法啟動，本機錄音仍會保存。');
           });
       }
+      if (!live) startMeter(mic);
       recorder.current = r;
       let settleRecording: (saved: boolean) => void = () => {};
       recordingSettled.current = new Promise((resolve) => {
@@ -741,6 +817,8 @@ export function App() {
       };
       r.onstop = () => {
         const stoppedAt = pausedAt || Date.now();
+        stopLocalMeter.current?.();
+        stopLocalMeter.current = undefined;
         setRecording(false);
         setSavingRecording(true);
         setPaused(false);
@@ -761,7 +839,10 @@ export function App() {
           await Promise.all([writes, ...transcriptWrites]);
           if (reloadRequested.current) {
             // Let recently committed transcripts get their translations without blocking reload indefinitely.
-            await translationQueueRef.current?.finish(3000);
+            const queue = translationQueueRef.current;
+            await queue?.finish(3000);
+            await Promise.allSettled(translationWrites.current);
+            if (translationQueueRef.current === queue) translationQueueRef.current = null;
             await Promise.all(transcriptWrites);
           }
           if (!failed)
@@ -789,7 +870,7 @@ export function App() {
               ),
             ]);
           }
-          savedForReload = !failed && !transcriptSaveFailed;
+          savedForReload = !failed && !transcriptSaveFailed && !translationSaveFailed.current;
           setLiveStatus('');
           setInterims({});
           publishLevels({ mic: 0, system: 0 });
@@ -815,10 +896,10 @@ export function App() {
       display?.getTracks().forEach((t) => t.stop());
       if (live) void live.stop().catch(() => {});
       liveCapture.current = null;
+      stopLocalMeter.current?.();
+      stopLocalMeter.current = undefined;
       if (mixer && mixer.state !== 'closed') void mixer.close().catch(() => {});
       mixContext.current = null;
-      translationQueueRef.current?.cancel();
-      translationQueueRef.current = null;
       streams.current = [];
       publishLevels({ mic: 0, system: 0 });
       setError(
@@ -856,6 +937,7 @@ export function App() {
         checkpointAudio(r);
         r.pause();
         await liveCapture.current?.pause();
+        publishLevels({ mic: 0, system: 0 });
         setPaused(true);
       } else if (r.state === 'paused') {
         await liveCapture.current?.resume();
@@ -904,13 +986,43 @@ export function App() {
     [meeting?.notes, segments],
   );
 
-  const handleAppendSegment = useCallback((segment: TranscriptSegment) => {
-    if (selectedRef.current === segment.meetingId) setSegments((old) => [...old, segment]);
-  }, []);
+  const handleTranscriptionSaved = useCallback(
+    (sourceRecording: Recording, added: TranscriptSegment[], previous?: TranscriptSegment[]) => {
+      if (selectedRef.current !== sourceRecording.meetingId) return;
+      const replaced = new Set(previous?.map((item) => item.id));
+      for (const id of replaced) translationQueueRef.current?.remove(id);
+      const starts = new Map(recordings.map((item) => [item.id, item.createdAt]));
+      starts.set(sourceRecording.id, sourceRecording.createdAt);
+      setSegments((old) =>
+        [...old.filter((item) => !replaced.has(item.id)), ...added].sort(
+          (a, b) =>
+            (starts.get(a.recordingId ?? '') ?? 0) - (starts.get(b.recordingId ?? '') ?? 0) ||
+            a.startedAtMs - b.startedAtMs,
+        ),
+      );
+      handleTranslate(added.filter(needsTranslation));
+    },
+    [handleTranslate, recordings],
+  );
 
   const handleSegmentTextChange = useCallback((id: string, text: string) => {
-    setSegments((old) => old.map((item) => (item.id === id ? { ...item, text } : item)));
+    translationQueueRef.current?.remove(id);
+    setTranslating((old) => {
+      if (!old.has(id)) return old;
+      const next = new Map(old);
+      next.delete(id);
+      return next;
+    });
+    setSegments((old) =>
+      old.map((item) =>
+        item.id === id
+          ? { ...item, text, translation: undefined, translationIsFinal: undefined }
+          : item,
+      ),
+    );
   }, []);
+
+  const closeRecordingTranscription = useCallback(() => setRecordingToTranscribe(null), []);
 
   const handleRecordingSaved = useCallback(() => {
     const id = selectedRef.current;
@@ -1185,6 +1297,7 @@ export function App() {
                   disabled={workspaceLocked}
                   onDelete={async () => {
                     translationQueueRef.current?.cancel();
+                    translationQueueRef.current = null;
                     await flushPendingSaves();
                     await deleteMeeting(meeting.id);
                     const nextSelected =
@@ -1342,7 +1455,7 @@ export function App() {
               </div>
 
               <AudioMeters
-                active={recording && liveEnabled}
+                active={recording && !paused}
                 both={source === 'both'}
                 subscribeLevels={subscribeLevels}
               />
@@ -1368,7 +1481,12 @@ export function App() {
               {recordings.length > 0 && (
                 <div className="recordings-list">
                   {recordings.map((item) => (
-                    <RecordingPlayer key={item.id} recording={item} />
+                    <RecordingPlayer
+                      key={item.id}
+                      recording={item}
+                      disabled={workspaceLocked}
+                      onTranscribe={setRecordingToTranscribe}
+                    />
                   ))}
                 </div>
               )}
@@ -1380,17 +1498,23 @@ export function App() {
                   key={`transcript-${meeting.id}`}
                   meetingId={meeting.id}
                   meetingTitle={meeting.title}
-                  isBilingual={meeting.mode === '雙語會議'}
+                  isBilingual={isBilingual}
                   languageHints={languageHints}
                   segments={segments}
                   interims={interims}
-                  onAppend={handleAppendSegment}
+                  recordingToTranscribe={
+                    recordingToTranscribe?.meetingId === meeting.id ? recordingToTranscribe : null
+                  }
+                  translating={translating}
+                  onAppend={handleTranscriptionSaved}
+                  onCloseRecordingTranscription={closeRecordingTranscription}
+                  onTranslate={handleTranslate}
                   onTextChange={handleSegmentTextChange}
                   onRecordingSaved={handleRecordingSaved}
                   onBusyChange={setUploading}
                   onSeek={handleSeekRecording}
                   settings={settings}
-                  locked={recording || busy}
+                  locked={recording || busy || generating}
                 />
               </div>
 
