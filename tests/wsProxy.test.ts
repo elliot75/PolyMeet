@@ -8,6 +8,7 @@ import type { SttServerEvent } from '../src/shared/protocol';
 describe('websocket proxy', () => {
   const server = createServer();
   let port: number;
+  afterEach(() => vi.unstubAllEnvs());
   beforeAll(async () => {
     attachSttProxy(server, () => {
       throw new Error('fixture connection setup failure');
@@ -28,6 +29,31 @@ describe('websocket proxy', () => {
     });
     const [error] = await once(socket, 'error');
     expect(error).toBeInstanceOf(Error);
+  });
+  it('accepts the configured HTTPS origin without granting a fallback key', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'server-secret');
+    vi.stubEnv('POLYMEET_HTTPS_ORIGINS', 'https://meet.example.ts.net');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws/stt`, {
+      origin: 'https://meet.example.ts.net',
+      headers: { Host: 'meet.example.ts.net' },
+    });
+    await once(socket, 'open');
+    const message = once(socket, 'message');
+    const closed = once(socket, 'close');
+    socket.send(
+      JSON.stringify({
+        type: 'session.start',
+        provider: 'openai',
+        model: 'gpt-live-transcribe',
+        sampleRate: 24000,
+        track: 'mic',
+      }),
+    );
+    expect(JSON.parse((await message)[0].toString())).toMatchObject({
+      type: 'error',
+      code: 'missing_api_key',
+    });
+    await closed;
   });
   it('rejects invalid startup messages without opening an upstream connection', async () => {
     const socket = new WebSocket(`ws://127.0.0.1:${port}/ws/stt`, {

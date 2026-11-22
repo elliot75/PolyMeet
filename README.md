@@ -15,6 +15,35 @@ npm run dev
 
 在介面設定中填入 API 金鑰與各功能的模型 ID；預設只在目前瀏覽器分頁保存金鑰；可在設定中選擇記住金鑰，跨分頁保留。也可複製 `.env.example` 為 `.env`，設定後端備用金鑰，重新啟動服務後生效。後端只監聽本機。可用模型依供應商帳號權限而異，呼叫服務可能產生費用。
 
+## 從區域網路或 Tailnet 使用
+
+在主機上執行 `npm run build`，把要使用的 HTTPS 網址加入 `.env`，再執行 `npm start`。網址用逗號隔開，並只填來源（協定、主機名稱及非預設埠）。
+
+```dotenv
+POLYMEET_HTTPS_ORIGINS=https://192.168.1.10:8443,https://my-node.my-tailnet.ts.net
+```
+
+- **Tailnet**：在主機上執行 `tailscale serve --bg http://127.0.0.1:3001`，將指令顯示的 HTTPS 網址填入上方清單。其他電腦連上 Tailnet 後即可開啟。若 Tailscale 提示啟用 HTTPS，請依提示完成設定。[Tailscale Serve 文件](https://tailscale.com/docs/reference/tailscale-cli/serve)
+- **區域網路**：在主機上安裝 Caddy，將以下設定的 IP 換成主機的區網 IP。若 Tailscale Serve 的 HTTPS 功能無法啟用，也可加一個同樣的站台區塊，使用主機的 Tailnet IP。把各網址加入 `POLYMEET_HTTPS_ORIGINS`。用戶端電腦信任該主機的 Caddy 根憑證後，即可開啟相同的 HTTPS 網址。若主機開啟防火牆，請允許用戶端連到 TCP 8443。[Caddy 反向代理文件](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy) [Caddy 根憑證說明](https://caddyserver.com/docs/automatic-https#local-https)
+
+```caddyfile
+{
+  auto_https disable_redirects
+}
+
+https://192.168.1.10:8443 {
+  bind 192.168.1.10
+  tls internal
+  reverse_proxy 127.0.0.1:3001
+}
+```
+
+將上方設定存成 `Caddyfile` 後，執行 `caddy run --config Caddyfile`。
+
+麥克風和分頁音訊需要瀏覽器信任的 HTTPS。遠端使用者請在各自瀏覽器的設定填入 API 金鑰。會議資料依瀏覽器、裝置和網址分開儲存。[MDN 安全環境說明](https://developer.mozilla.org/en-US/docs/Web/Security/Defenses/Secure_Contexts)
+
+## 錄音和會議資料
+
 會議、逐字稿、會議紀錄及錄音片段保存在瀏覽器 IndexedDB。錄音約每秒寫入一個片段，暫停或離開頁面時會要求保存目前片段。需要重整時，請使用「儲存錄音並重整」：它會結束錄音，等已收到的資料寫入後再重整。直接重整或瀏覽器異常關閉時，只能取回已寫入的資料，不能保證保住尚未交付的最後一段。已保存的未定稿及未完成譯文會在逐字稿標示。請定期下載重要錄音。
 
 即時轉錄連線未就緒或中斷時，會自動重試，並重播尚未完成的音訊。新的連線可帶入最多 500 ms 的前置靜音，避免重送已定稿的語音。若關閉即時轉錄，麥克風與分頁音量仍可在本機監測。錄音保存後，包含錄音中斷時保存的片段，都可在播放器選擇「轉錄此錄音」。若已有逐字稿，請選擇附加或覆蓋。只有轉錄成功且辨識出語音時，才會寫入新逐字稿。

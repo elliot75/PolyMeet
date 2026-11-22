@@ -4,6 +4,7 @@ import type { SttStart, SttServerEvent } from '../../shared/protocol';
 import { usesManualCommit } from '../../shared/models';
 import { createEventMapper, geminiConfiguration, openAiConfiguration } from './adapters';
 import { isAllowedOrigin } from '../origin';
+import { serverProviderKey } from '../config';
 
 // 600 ms of PCM16 at 24 kHz exceeds OpenAI's default 500 ms VAD silence threshold.
 const vadTailSilence = Buffer.alloc(24_000 * 2 * 0.6).toString('base64');
@@ -31,9 +32,9 @@ export function attachSttProxy(
       socket.destroy();
       return;
     }
-    wss.handleUpgrade(request, socket, head, (client) => wss.emit('connection', client));
+    wss.handleUpgrade(request, socket, head, (client) => wss.emit('connection', client, request));
   });
-  wss.on('connection', (client) => {
+  wss.on('connection', (client, request) => {
     let upstream: WebSocket | undefined;
     let started = false,
       ready = false,
@@ -107,10 +108,11 @@ export function attachSttProxy(
         provider = start.provider;
         const key =
           start.apiKey?.trim() ||
-          (start.provider === 'openai'
-            ? process.env.OPENAI_API_KEY
-            : process.env.GEMINI_API_KEY
-          )?.trim();
+          serverProviderKey(
+            start.provider,
+            request.headers.host,
+            request.headers['x-forwarded-host']?.toString(),
+          );
         if (!key) {
           fail('missing_api_key', '請設定即時轉錄的 API 金鑰。');
           return;
