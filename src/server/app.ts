@@ -4,7 +4,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { GoogleGenAI, createPartFromUri, createUserContent } from '@google/genai';
 import OpenAI from 'openai';
-import { isProvider, providerKey } from './config';
+import { isProvider, providerKey, requestHost, serverProviderKey } from './config';
 import { generateText } from './providers/text';
 import {
   openAITranscriptionFormat,
@@ -28,8 +28,7 @@ function isAuthError(error: unknown): boolean {
 
 export const app = new Hono();
 app.use('*', async (c, next) => {
-  const host = c.req.header('host') || new URL(c.req.url).host;
-  if (!isAllowedOrigin(host, c.req.header('origin')))
+  if (!isAllowedOrigin(requestHost(c), c.req.header('origin')))
     return c.json({ error: 'origin_not_allowed' }, 403);
   await next();
   c.header('X-Content-Type-Options', 'nosniff');
@@ -43,8 +42,12 @@ app.get('/api/health', (c) =>
   c.json({
     status: 'ok',
     serverKeys: {
-      openai: Boolean(process.env.OPENAI_API_KEY?.trim()),
-      gemini: Boolean(process.env.GEMINI_API_KEY?.trim()),
+      openai: Boolean(
+        serverProviderKey('openai', requestHost(c), c.req.header('x-forwarded-host')),
+      ),
+      gemini: Boolean(
+        serverProviderKey('gemini', requestHost(c), c.req.header('x-forwarded-host')),
+      ),
     },
   }),
 );

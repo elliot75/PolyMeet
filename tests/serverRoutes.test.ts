@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { app } from '../src/server/app';
 import { providerKey } from '../src/server/config';
 
 describe('server routes', () => {
   const original = process.env.OPENAI_API_KEY;
   afterEach(() => {
+    vi.unstubAllEnvs();
     if (original === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = original;
   });
@@ -25,6 +26,20 @@ describe('server routes', () => {
       typeof providerKey
     >[0];
     expect(providerKey(context, 'openai')).toBe('browser-secret');
+  });
+  it('serves configured remote origins without making fallback keys available', async () => {
+    vi.stubEnv('POLYMEET_HTTPS_ORIGINS', 'https://meet.example.ts.net');
+    process.env.OPENAI_API_KEY = 'server-secret';
+    const headers = { Host: 'meet.example.ts.net', Origin: 'https://meet.example.ts.net' };
+    const health = await app.request('/api/health', { headers });
+    expect(health.status).toBe(200);
+    expect(await health.json()).toMatchObject({ serverKeys: { openai: false } });
+    const models = await app.request('/api/models?provider=openai', { headers });
+    expect(models.status).toBe(401);
+    const forwarded = await app.request('/api/models?provider=openai', {
+      headers: { Host: 'localhost:3001', 'X-Forwarded-Host': 'localhost:3001' },
+    });
+    expect(forwarded.status).toBe(401);
   });
   it('rejects missing credentials and external origins', async () => {
     delete process.env.OPENAI_API_KEY;
