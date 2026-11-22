@@ -10,7 +10,10 @@ import {
   saveRecordingSegments,
   saveSegment,
   saveUploadedRecording,
+  searchMeetingContent,
+  subscribeToMeetingContent,
   updateSegmentText,
+  updateSegmentTranslation,
 } from '../src/client/db/meetingDb';
 import {
   transcribeAudio,
@@ -133,6 +136,31 @@ describe('file and saved recording transcription', () => {
       id: previous.id,
       text: reason === 'concurrent edit' ? 'edited' : previous.text,
     });
+  });
+
+  it('refreshes meeting search when saved transcription and its translation are committed', async () => {
+    const { recording, options } = await setup();
+    vi.stubGlobal('fetch', async () => Response.json({ text: 'transcription search term' }));
+    const changed = vi.fn();
+    const unsubscribe = subscribeToMeetingContent(changed);
+    try {
+      const [segment] = await transcribeSavedRecording(options);
+      expect(changed).toHaveBeenCalledTimes(1);
+      expect(
+        (await searchMeetingContent('transcription search term')).get(recording.meetingId),
+      ).toEqual(new Set(['transcript']));
+      expect(await updateSegmentTranslation(segment.id, 'stale', true, 'old text')).toBe(false);
+      expect(changed).toHaveBeenCalledTimes(1);
+      expect(await updateSegmentTranslation(segment.id, '譯文搜尋詞', true, segment.text)).toBe(
+        true,
+      );
+      expect(changed).toHaveBeenCalledTimes(2);
+      expect((await searchMeetingContent('譯文搜尋詞')).get(recording.meetingId)).toEqual(
+        new Set(['translation']),
+      );
+    } finally {
+      unsubscribe();
+    }
   });
 
   it('keeps a speaker rename made while transcription is replacing an existing transcript', async () => {

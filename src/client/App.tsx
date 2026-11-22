@@ -9,6 +9,7 @@ import { recordingFilename } from './services/fileTranscription';
 import { needsTranslation, TranslationQueue } from './services/translationQueue';
 import { ProjectionOverlay } from './components/ProjectionOverlay';
 import { DeleteMeetingDialog } from './components/DeleteMeetingDialog';
+import { LocalWorkspace } from './components/LocalWorkspace';
 import { formatTimestamp } from './services/exporter';
 import type { AudioTrackRole, TranscriptSegment } from '../shared/types';
 import { languageCode, languages } from '../shared/languages';
@@ -19,6 +20,9 @@ import {
   listRecordings,
   listSegments,
   migrateMeetings,
+  normalizeMeetingQuery,
+  searchMeetingContent,
+  subscribeToMeetingContent,
   deleteMeeting,
   saveInterimSegment,
   saveSegment,
@@ -27,6 +31,7 @@ import {
   saveMeeting,
   saveRecording,
   type Meeting,
+  type MeetingSearchSource,
   type Recording,
 } from './db/meetingDb';
 import {
@@ -50,6 +55,11 @@ type LevelSubscriber = (levels: AudioLevels) => void;
 
 const AUDIO_SLICE_MS = 1000;
 const SELECTED_MEETING_KEY = 'polymeet-selected-meeting';
+const SEARCH_SOURCE_LABELS: Record<MeetingSearchSource, string> = {
+  transcript: '逐字稿',
+  translation: '譯文',
+  minutes: 'AI 紀錄',
+};
 
 function checkpointAudio(recorder: MediaRecorder | null) {
   if (!recorder || recorder.state === 'inactive') return;
@@ -203,6 +213,10 @@ export function App() {
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [query, setQuery] = useState('');
+  const [searchResult, setSearchResult] = useState<{
+    term: string;
+    matches: Awaited<ReturnType<typeof searchMeetingContent>> | null;
+  }>();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [studioTab, setStudioTab] = useState<'notes' | 'minutes'>('notes');
   const [minutesCount, setMinutesCount] = useState(0);
@@ -258,6 +272,31 @@ export function App() {
   const sourceLanguage = meeting?.sourceLang || '繁體中文';
   const targetLanguage = meeting?.targetLang || 'English';
   const workspaceLocked = recording || busy || uploading || generating;
+  const normalizedQuery = normalizeMeetingQuery(query);
+
+  useEffect(() => {
+    if (!normalizedQuery) return;
+    let active = true;
+    let timer: number | undefined;
+    let latestRequest = 0;
+    const scheduleSearch = () => {
+      if (timer !== undefined) return;
+      timer = window.setTimeout(async () => {
+        timer = undefined;
+        const request = ++latestRequest;
+        const matches = await searchMeetingContent(normalizedQuery).catch(() => null);
+        if (active && request === latestRequest)
+          setSearchResult({ term: normalizedQuery, matches });
+      }, 180);
+    };
+    const unsubscribe = subscribeToMeetingContent(scheduleSearch);
+    scheduleSearch();
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+      unsubscribe();
+    };
+  }, [normalizedQuery]);
 
   const handleTranslate = useCallback(
     (items: TranscriptSegment[]) => {
@@ -491,7 +530,7 @@ export function App() {
     }
     if (!drawerOpen) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setDrawerOpen(false);
+      if (event.key === 'Escape' && !document.querySelector('dialog[open]')) setDrawerOpen(false);
     };
     const narrowViewport = window.matchMedia('(max-width: 860px)');
     const onResize = () => {
@@ -1071,12 +1110,20 @@ export function App() {
     setSettings(value);
   }, []);
 
-  const normalizedQuery = query.trim().toLowerCase();
-  const filteredMeetings = meetings.filter(
-    (m) =>
-      !normalizedQuery ||
-      m.title.toLowerCase().includes(normalizedQuery) ||
-      m.notes.toLowerCase().includes(normalizedQuery),
+  const fullTextResult = searchResult?.term === normalizedQuery ? searchResult : undefined;
+  const searchPending = Boolean(normalizedQuery && !fullTextResult);
+  const fullTextMatches = fullTextResult?.matches;
+  const filteredMeetings = useMemo(
+    () =>
+      normalizedQuery
+        ? meetings.filter(
+            (item) =>
+              fullTextMatches?.has(item.id) ||
+              normalizeMeetingQuery(item.title).includes(normalizedQuery) ||
+              normalizeMeetingQuery(item.notes).includes(normalizedQuery),
+          )
+        : meetings,
+    [fullTextMatches, meetings, normalizedQuery],
   );
   const formattedElapsed = formatTimestamp(elapsed * 1000);
 
@@ -1122,12 +1169,12 @@ export function App() {
           <span className="count">{meetings.length}</span>
         </div>
 
-        <label className="search">
+        <div className="search">
           <IconSearch size={14} />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="搜尋標題或筆記…"
+            placeholder="搜尋會議內容…"
             aria-label="搜尋會議"
           />
           {query && (
@@ -1140,9 +1187,14 @@ export function App() {
               <IconX size={13} />
             </button>
           )}
-        </label>
+        </div>
 
-        <div className="meeting-list">
+        <div className="meeting-list" aria-busy={searchPending}>
+          {fullTextResult?.matches === null && (
+            <p className="sidebar-empty" role="status">
+              無法搜尋逐字稿與 AI 紀錄
+            </p>
+          )}
           {filteredMeetings.length > 0 ? (
             filteredMeetings.map((m) => (
               <button
@@ -1164,9 +1216,19 @@ export function App() {
                     {m.mode === '雙語會議' && <span className="meeting-mode-pill">雙語</span>}
                   </span>
                   <small>{new Date(m.createdAt).toLocaleDateString('zh-TW')}</small>
+                  {fullTextMatches?.has(m.id) && (
+                    <small className="meeting-search-match">
+                      命中{' '}
+                      {[...fullTextMatches.get(m.id)!]
+                        .map((source) => SEARCH_SOURCE_LABELS[source])
+                        .join('、')}
+                    </small>
+                  )}
                 </span>
               </button>
             ))
+          ) : searchPending ? (
+            <p className="sidebar-empty">搜尋中…</p>
           ) : meetings.length > 0 ? (
             <div className="sidebar-empty">
               <p>找不到符合的會議</p>
@@ -1181,15 +1243,18 @@ export function App() {
           )}
         </div>
 
-        <div className="sidebar-footer">
-          <span className="avatar" aria-hidden="true">
-            P
-          </span>
-          <span>
-            <strong>本機工作空間</strong>
-            <small>資料保存於此瀏覽器</small>
-          </span>
-        </div>
+        <LocalWorkspace
+          selectedMeeting={meeting}
+          meetingCount={meetings.length}
+          locked={workspaceLocked || savingRecording}
+          onBeforeExport={flushPendingSaves}
+          onImported={(imported) => {
+            setMeetings((current) =>
+              [...current, ...imported].sort((a, b) => b.createdAt - a.createdAt),
+            );
+            setSelected((current) => current ?? imported[0]?.id ?? null);
+          }}
+        />
       </aside>
 
       <main inert={drawerOpen}>
@@ -1512,6 +1577,7 @@ export function App() {
                   isBilingual={isBilingual}
                   languageHints={languageHints}
                   segments={segments}
+                  recordings={recordings}
                   interims={interims}
                   recordingToTranscribe={
                     recordingToTranscribe?.meetingId === meeting.id ? recordingToTranscribe : null

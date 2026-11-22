@@ -43,6 +43,7 @@ interface Props {
   isBilingual: boolean;
   languageHints: string[];
   segments: TranscriptSegment[];
+  recordings: Recording[];
   interims: Record<string, { track: AudioTrackRole; text: string }>;
   recordingToTranscribe: Recording | null;
   translating: ReadonlyMap<string, Promise<void>>;
@@ -87,6 +88,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
   isBilingual,
   languageHints,
   segments,
+  recordings,
   interims,
   recordingToTranscribe,
   translating,
@@ -354,26 +356,19 @@ export const TranscriptFeed = memo(function TranscriptFeed({
               補齊未譯段落
             </button>
           )}
-          {segments.length > 0 && (
-            <>
+          {segments.length > 0 &&
+            (['md', 'txt', 'srt', 'vtt'] as const).map((format) => (
               <button
+                key={format}
                 type="button"
                 className="secondary small-button"
-                onClick={() => downloadTranscript('md', segments, meetingTitle)}
+                aria-label={`匯出 ${format.toUpperCase()} ${format === 'srt' || format === 'vtt' ? '字幕' : '逐字稿'}`}
+                onClick={() => downloadTranscript(format, segments, meetingTitle, recordings)}
               >
                 <IconDownload size={14} />
-                <span>.md</span>
+                <span>.{format}</span>
               </button>
-              <button
-                type="button"
-                className="secondary small-button"
-                onClick={() => downloadTranscript('txt', segments, meetingTitle)}
-              >
-                <IconDownload size={14} />
-                <span>.txt</span>
-              </button>
-            </>
-          )}
+            ))}
           <button
             type="button"
             className="secondary small-button"
