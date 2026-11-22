@@ -1,0 +1,68 @@
+import { describe, expect, it } from 'vitest';
+import { encodeWav } from '../src/client/audio/audioChunker';
+describe('WAV encoding', () => {
+  it('writes a mono PCM header and clips samples', async () => {
+    const blob = encodeWav(new Float32Array([-2, 0, 2]), 16000);
+    const data = new DataView(await blob.arrayBuffer());
+    expect(blob.size).toBe(50);
+    expect(data.getUint32(24, true)).toBe(16000);
+    expect(data.getUint16(22, true)).toBe(1);
+    expect(data.getInt16(44, true)).toBe(-32768);
+    expect(data.getInt16(48, true)).toBe(32767);
+  });
+});
+
+describe('large audio segmentation', () => {
+  it('splits decoded audio into ten-minute WAV files and preserves offsets', async () => {
+    const { vi } = await import('vitest');
+    const { splitAudio } = await import('../src/client/audio/audioChunker');
+    const calls: Array<{ offset: number; duration: number; rate: number }> = [];
+    class MockAudioContext {
+      async decodeAudioData() {
+        return { duration: 1300 };
+      }
+      async close() {}
+    }
+    class MockOfflineAudioContext {
+      destination = {};
+      constructor(
+        _channels: number,
+        _length: number,
+        private rate: number,
+      ) {}
+      createBufferSource() {
+        return {
+          buffer: null,
+          connect() {},
+          start: (_when: number, offset: number, duration: number) =>
+            calls.push({ offset, duration, rate: this.rate }),
+        };
+      }
+      async startRendering() {
+        return { getChannelData: () => new Float32Array([0, 0.5]) };
+      }
+    }
+    vi.stubGlobal('AudioContext', MockAudioContext);
+    vi.stubGlobal('OfflineAudioContext', MockOfflineAudioContext);
+    try {
+      const input = new File([new Uint8Array(23 * 1024 * 1024 + 1)], 'large.wav', {
+        type: 'audio/wav',
+      });
+      const parts = [];
+      for await (const part of splitAudio(input)) parts.push(part);
+      expect(parts.map((part) => [part.offsetMs, part.index, part.total])).toEqual([
+        [0, 1, 3],
+        [600000, 2, 3],
+        [1200000, 3, 3],
+      ]);
+      expect(calls).toEqual([
+        { offset: 0, duration: 600, rate: 16000 },
+        { offset: 600, duration: 600, rate: 16000 },
+        { offset: 1200, duration: 100, rate: 16000 },
+      ]);
+      expect(parts.every((part) => part.file.type === 'audio/wav')).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
