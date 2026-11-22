@@ -197,7 +197,11 @@ export async function saveRecordingSegments(
         current.length !== previous.length ||
         current.some((segment) => {
           const snapshot = expected.get(segment.id);
-          return snapshot?.text !== segment.text || snapshot?.isFinal !== segment.isFinal;
+          return (
+            snapshot?.text !== segment.text ||
+            snapshot.isFinal !== segment.isFinal ||
+            snapshot.speakerLabel !== segment.speakerLabel
+          );
         })
       ) {
         throw new Error('此錄音的逐字稿已有變更，請關閉視窗後重新確認。');
@@ -270,6 +274,34 @@ export async function updateSegmentText(id: string, text: string): Promise<void>
   if (segment && segment.text !== text)
     await tx.store.put({ ...segment, text, translation: undefined, translationIsFinal: undefined });
   await tx.done;
+}
+
+export const MAX_SPEAKER_LABEL_LENGTH = 100;
+
+export async function renameSegmentSpeaker(
+  segment: Pick<TranscriptSegment, 'id' | 'meetingId' | 'speakerLabel'>,
+  name: string,
+  scope: 'segment' | 'speaker',
+): Promise<string[]> {
+  const speakerLabel = name.trim();
+  if (!speakerLabel || speakerLabel.length > MAX_SPEAKER_LABEL_LENGTH)
+    throw new Error('invalid speaker label');
+
+  const tx = (await db()).transaction('segments', 'readwrite');
+  const current = await tx.store.get(segment.id);
+  if (current?.meetingId !== segment.meetingId || current.speakerLabel !== segment.speakerLabel) {
+    await tx.done;
+    throw new Error('speaker label has changed or segment no longer exists');
+  }
+  const matches =
+    scope === 'segment'
+      ? [current]
+      : (await tx.store.index('by-meeting').getAll(current.meetingId)).filter(
+          (item) =>
+            item.recordingId === current.recordingId && item.speakerLabel === current.speakerLabel,
+        );
+  await Promise.all([tx.done, ...matches.map((item) => tx.store.put({ ...item, speakerLabel }))]);
+  return matches.map((item) => item.id);
 }
 
 export async function deleteMeeting(meetingId: string): Promise<void> {

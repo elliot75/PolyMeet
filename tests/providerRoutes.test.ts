@@ -45,7 +45,16 @@ describe('provider routes with simulated services', () => {
       text: JSON.stringify({ segments: [{ startSeconds: 1, endSeconds: 2, text: 'hello' }] }),
     });
   });
-  it('returns structured timestamps and deletes the uploaded cloud file', async () => {
+  it('returns Gemini timestamps and optional speakers and deletes the uploaded cloud file', async () => {
+    mocked.generate.mockResolvedValue({
+      text: JSON.stringify({
+        segments: [
+          { startSeconds: 1, endSeconds: 2, text: 'hello', speaker: ' 語者 A ' },
+          { startSeconds: 3, endSeconds: 4, text: 'hi', speaker: '語者 B' },
+          { startSeconds: 5, endSeconds: 6, text: 'yes', speaker: ' ' },
+        ],
+      }),
+    });
     const response = await app.request('/api/transcribe-file', {
       method: 'POST',
       headers: { 'x-gemini-api-key': 'test-key' },
@@ -53,9 +62,16 @@ describe('provider routes with simulated services', () => {
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
-      segments: [{ startSeconds: 1, endSeconds: 2, text: 'hello' }],
+      segments: [
+        { startSeconds: 1, endSeconds: 2, text: 'hello', speaker: '語者 A' },
+        { startSeconds: 3, endSeconds: 4, text: 'hi', speaker: '語者 B' },
+        { startSeconds: 5, endSeconds: 6, text: 'yes' },
+      ],
       cleanupWarning: false,
     });
+    expect(mocked.generate.mock.calls[0][0].contents[1]).toContain(
+      'stable anonymous speaker labels',
+    );
     expect(mocked.remove).toHaveBeenCalledWith({ name: 'files/test' });
   });
   it('deletes the cloud file even if generation fails, without exposing provider details', async () => {
@@ -137,18 +153,82 @@ describe('provider routes with simulated services', () => {
       expect(body).not.toContain('event: done');
     },
   );
-  it('uses the requested Chinese script for file transcripts', async () => {
+  it.each([
+    [
+      'whisper-1',
+      { response_format: 'verbose_json', timestamp_granularities: ['segment'] },
+      undefined,
+    ],
+    [
+      'gpt-4o-transcribe-diarize',
+      { response_format: 'diarized_json', chunking_strategy: 'auto' },
+      'A',
+    ],
+  ])('returns original audio offsets from %s segments', async (model, format, speaker) => {
     const data = form();
     data.set('provider', 'openai');
+    data.set('model', model);
     data.append('language', 'zh-TW');
-    mocked.openaiTranscribe.mockResolvedValue({ text: '会议记录' });
+    mocked.openaiTranscribe.mockResolvedValue({
+      text: '汇报 会议',
+      segments: [
+        { start: 3.75, end: 5, text: '会议', ...(speaker ? { speaker: 'B' } : {}) },
+        { start: 1.25, end: 2.5, text: ' 汇报 ', ...(speaker ? { speaker } : {}) },
+      ],
+    });
     const response = await app.request('/api/transcribe-file', {
       method: 'POST',
       headers: { 'x-openai-api-key': 'test-key' },
       body: data,
     });
-    expect(await response.json()).toEqual({ text: '會議記錄' });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      segments: [
+        { startSeconds: 1.25, endSeconds: 2.5, text: '彙報', ...(speaker ? { speaker } : {}) },
+        { startSeconds: 3.75, endSeconds: 5, text: '會議', ...(speaker ? { speaker: 'B' } : {}) },
+      ],
+    });
+    expect(mocked.openaiTranscribe).toHaveBeenCalledWith(
+      expect.objectContaining({ model, language: 'zh', ...format }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
   });
+
+  it.each([undefined, [], [{ start: 2, end: 1, text: 'text' }]])(
+    'falls back to untimed text when the response has no usable timestamps (%j)',
+    async (segments) => {
+      const data = form();
+      data.set('provider', 'openai');
+      data.set('model', 'whisper-1');
+      mocked.openaiTranscribe.mockResolvedValue({ text: 'still usable', segments });
+      const response = await app.request('/api/transcribe-file', {
+        method: 'POST',
+        headers: { 'x-openai-api-key': 'test-key' },
+        body: data,
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ text: 'still usable' });
+      expect(mocked.openaiTranscribe).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['gpt-transcribe', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe'])(
+    'uses the default text response and requested Chinese script for %s',
+    async (model) => {
+      const data = form();
+      data.set('provider', 'openai');
+      data.set('model', model);
+      data.append('language', 'zh-TW');
+      mocked.openaiTranscribe.mockResolvedValue({ text: '会议记录' });
+      const response = await app.request('/api/transcribe-file', {
+        method: 'POST',
+        headers: { 'x-openai-api-key': 'test-key' },
+        body: data,
+      });
+      expect(await response.json()).toEqual({ text: '會議記錄' });
+      expect(mocked.openaiTranscribe.mock.calls[0][0]).not.toHaveProperty('response_format');
+    },
+  );
   it('uses the selected output language even for polished minutes and converts split deltas', async () => {
     mocked.openaiResponse.mockResolvedValue(
       (async function* () {

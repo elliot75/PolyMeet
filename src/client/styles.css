@@ -1181,6 +1181,8 @@ dialog select {
 }
 
 .segment-badge {
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
   font-size: 11.5px;
   font-weight: 700;
   padding: 2px 9px;
@@ -1200,6 +1202,22 @@ dialog select {
 .segment-badge.upload {
   background: var(--soft);
   color: var(--ink-secondary);
+}
+
+.speaker-rename {
+  min-block-size: 26px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 2px 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.speaker-rename:hover:not(:disabled) {
+  border-color: var(--line);
+  background: var(--soft);
+  color: var(--ink);
 }
 
 .seek {
@@ -1707,6 +1725,39 @@ dialog.upload-dialog {
 .recording-transcript-options input {
   flex: none;
   margin-block-start: 4px;
+}
+
+dialog.speaker-dialog {
+  max-width: min(440px, calc(100% - 32px));
+}
+
+.speaker-form {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.speaker-form > input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--elevated);
+  color: var(--ink);
+  font-size: 16px;
+}
+
+.speaker-scope {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-block-size: 44px;
+  cursor: pointer;
+}
+
+.speaker-scope input {
+  flex: none;
 }
 
 @media (prefers-reduced-motion: no-preference) {

@@ -1024,6 +1024,17 @@ export function App() {
 
   const closeRecordingTranscription = useCallback(() => setRecordingToTranscribe(null), []);
 
+  const handleSpeakerChange = useCallback(
+    (meetingId: string, ids: string[], speakerLabel: string) => {
+      if (selectedRef.current !== meetingId) return;
+      const changed = new Set(ids);
+      setSegments((old) =>
+        old.map((item) => (changed.has(item.id) ? { ...item, speakerLabel } : item)),
+      );
+    },
+    [],
+  );
+
   const handleRecordingSaved = useCallback(() => {
     const id = selectedRef.current;
     if (!id) return;
@@ -1510,6 +1521,7 @@ export function App() {
                   onCloseRecordingTranscription={closeRecordingTranscription}
                   onTranslate={handleTranslate}
                   onTextChange={handleSegmentTextChange}
+                  onSpeakerChange={handleSpeakerChange}
                   onRecordingSaved={handleRecordingSaved}
                   onBusyChange={setUploading}
                   onSeek={handleSeekRecording}

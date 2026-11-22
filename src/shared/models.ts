@@ -25,6 +25,7 @@ export const suggestedModels: Record<ProviderId, readonly ModelOption[]> = {
     { id: 'gpt-4o-transcribe', capabilities: ['live', 'file'] },
     { id: 'gpt-4o-mini-transcribe', capabilities: ['live', 'file'] },
     { id: 'whisper-1', capabilities: ['file'] },
+    { id: 'gpt-4o-transcribe-diarize', capabilities: ['file'] },
     { id: 'gpt-5-mini', capabilities: ['translation', 'minutes'] },
     { id: 'gpt-5', capabilities: ['translation', 'minutes'] },
   ],

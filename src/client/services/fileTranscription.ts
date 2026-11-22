@@ -1,4 +1,5 @@
 import { splitAudio } from '../audio/audioChunker';
+import { uploadedSegments, type FileTranscriptionResult } from '../audio/uploadedSegments';
 import { getRecordingBlob, saveRecordingSegments, type Recording } from '../db/meetingDb';
 import type { TranscriptSegment } from '../../shared/types';
 import { headers, type Settings } from './settings';
@@ -44,26 +45,9 @@ export async function* transcribeAudio(
             : '音檔轉錄失敗，請檢查模型、金鑰及後端服務。',
       );
     }
-    const result = await response.json();
+    const result: FileTranscriptionResult = await response.json();
     signal.throwIfAborted();
-    const timed = Array.isArray(result.segments);
-    const items: { text: string; startSeconds: number; endSeconds?: number }[] = timed
-      ? result.segments
-      : result.text?.trim()
-        ? [{ text: result.text.trim(), startSeconds: 0 }]
-        : [];
-    const segments: TranscriptSegment[] = items.map((item) => ({
-      id: crypto.randomUUID(),
-      meetingId: recording.meetingId,
-      recordingId: recording.id,
-      track: 'upload',
-      speakerLabel: '音檔',
-      startedAtMs: part.offsetMs + item.startSeconds * 1000,
-      timeIsChunkStart: !timed,
-      endedAtMs: item.endSeconds === undefined ? undefined : part.offsetMs + item.endSeconds * 1000,
-      text: item.text,
-      isFinal: true,
-    }));
+    const segments = uploadedSegments(result, recording, part);
     yield { index: part.index, segments, cleanupWarning: Boolean(result.cleanupWarning) };
   }
 }

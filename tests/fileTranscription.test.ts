@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   listRecordings,
   listSegments,
+  renameSegmentSpeaker,
   saveAudioChunk,
   saveMeeting,
   saveRecording,
@@ -71,14 +72,22 @@ describe('file and saved recording transcription', () => {
       expect(file.name.endsWith('.webm')).toBe(true);
       expect(file.type).toBe(recording.mimeType);
       expect(await file.text()).toBe('firstsecond');
-      return Response.json({ segments: [{ text: 'new', startSeconds: 1.25, endSeconds: 1.75 }] });
+      return Response.json({
+        segments: [{ text: 'new', startSeconds: 1.25, endSeconds: 1.75, speaker: '語者 A' }],
+      });
     });
     vi.stubGlobal('fetch', fetchMock);
 
     const added = await transcribeSavedRecording(options);
 
     expect(added).toMatchObject([
-      { recordingId: recording.id, startedAtMs: 1250, endedAtMs: 1750, isFinal: true },
+      {
+        recordingId: recording.id,
+        startedAtMs: 1250,
+        endedAtMs: 1750,
+        speakerLabel: '語者 A',
+        isFinal: true,
+      },
     ]);
     expect(await listSegments(recording.meetingId)).toEqual([previous, ...added]);
     expect(await listRecordings(recording.meetingId)).toEqual([recording]);
@@ -124,6 +133,19 @@ describe('file and saved recording transcription', () => {
       id: previous.id,
       text: reason === 'concurrent edit' ? 'edited' : previous.text,
     });
+  });
+
+  it('keeps a speaker rename made while transcription is replacing an existing transcript', async () => {
+    const { recording, previous, options } = await setup();
+    vi.stubGlobal('fetch', async () => {
+      await renameSegmentSpeaker(previous, 'Alice', 'segment');
+      return Response.json({ text: 'new transcript' });
+    });
+
+    await expect(transcribeSavedRecording(options, [previous])).rejects.toThrow();
+    expect(await listSegments(recording.meetingId)).toEqual([
+      { ...previous, speakerLabel: 'Alice' },
+    ]);
   });
 
   it('rolls back deletion when the replacement encounters a storage conflict', async () => {

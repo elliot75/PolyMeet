@@ -6,6 +6,7 @@ import {
   listRecordings,
   listSegments,
   migrateMeetings,
+  renameSegmentSpeaker,
   saveAudioChunk,
   saveInterimSegment,
   saveMeeting,
@@ -102,6 +103,89 @@ describe('meeting database', () => {
     await saveSegment(final);
     await saveInterimSegment({ ...draft, text: 'stale partial' });
     expect(await listSegments(meetingId)).toEqual([final]);
+  });
+
+  it('renames one segment or matching labels in its recording without touching other fields', async () => {
+    const meeting = {
+      id: 'speaker-meeting',
+      title: 'Speaker',
+      createdAt: 1,
+      notes: '',
+      mode: '一般會議',
+    };
+    const other = { ...meeting, id: 'speaker-other-meeting' };
+    await saveMeeting(meeting);
+    await saveMeeting(other);
+    const base = {
+      meetingId: meeting.id,
+      recordingId: 'speaker-recording',
+      speakerLabel: '語者 A',
+      track: 'upload' as const,
+      text: 'original',
+      translation: 'translation',
+      startedAtMs: 1250,
+      endedAtMs: 2500,
+      isFinal: true,
+    };
+    const first = { ...base, id: 'speaker-first' };
+    const second = { ...base, id: 'speaker-second' };
+    const third = { ...base, id: 'speaker-third' };
+    const unrelated = [
+      { ...base, id: 'speaker-B', speakerLabel: '語者 B' },
+      { ...base, id: 'speaker-other-file', recordingId: 'another-file' },
+      { ...base, id: 'speaker-no-recording', recordingId: undefined },
+    ];
+    const differentMeeting = { ...base, id: 'speaker-other', meetingId: other.id };
+    await saveSegments(meeting.id, [first, second, third, ...unrelated]);
+    await saveSegment(differentMeeting);
+
+    await expect(renameSegmentSpeaker(first, '   ', 'segment')).rejects.toThrow(
+      'invalid speaker label',
+    );
+    expect(await renameSegmentSpeaker(first, ' 小林 ', 'segment')).toEqual([first.id]);
+    expect((await listSegments(meeting.id)).find((item) => item.id === second.id)).toEqual(second);
+    await expect(renameSegmentSpeaker(first, 'stale name', 'speaker')).rejects.toThrow(
+      'speaker label has changed',
+    );
+    expect(await renameSegmentSpeaker(second, '陳小姐', 'speaker')).toEqual([second.id, third.id]);
+    expect(await listSegments(meeting.id)).toEqual(
+      expect.arrayContaining([
+        { ...first, speakerLabel: '小林' },
+        { ...second, speakerLabel: '陳小姐' },
+        { ...third, speakerLabel: '陳小姐' },
+        ...unrelated,
+      ]),
+    );
+    expect(await listSegments(other.id)).toEqual([differentMeeting]);
+  });
+
+  it('scopes a batch rename of unlinked segments to the same meeting and excludes recordings', async () => {
+    const meetingId = 'unlink-speaker-meeting';
+    await saveMeeting({
+      id: meetingId,
+      title: 'Unlinked',
+      createdAt: 1,
+      notes: '',
+      mode: '一般會議',
+    });
+    const first = {
+      id: 'unlinked-1',
+      meetingId,
+      speakerLabel: '對方',
+      track: 'system' as const,
+      text: 'text',
+      startedAtMs: 0,
+      isFinal: false,
+    };
+    const second = { ...first, id: 'unlinked-2' };
+    const recorded = { ...first, id: 'linked-1', recordingId: 'linked-recording' };
+    await saveSegments(meetingId, [first, second, recorded]);
+    expect(await renameSegmentSpeaker(first, '林先生', 'speaker')).toEqual([first.id, second.id]);
+    expect(await listSegments(meetingId)).toEqual([
+      recorded,
+      { ...first, speakerLabel: '林先生' },
+      { ...second, speakerLabel: '林先生' },
+    ]);
   });
 
   it('orders segments by recording and then by offset', async () => {
