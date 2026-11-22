@@ -12,6 +12,7 @@ export type SttClientMessage =
   | SttStart
   | { type: 'audio.chunk'; pcm16Base64: string }
   | { type: 'audio.commit' }
+  | { type: 'audio.end' }
   | { type: 'session.stop' };
 export type SttServerEvent =
   | { type: 'session.ready'; provider: ProviderId; model: string }

@@ -18,11 +18,22 @@ export async function* generateText(
         instructions: instruction,
         input,
         stream: true,
+        store: false,
       },
       { signal },
     );
-    for await (const event of stream)
+    let completed = false;
+    for await (const event of stream) {
       if (event.type === 'response.output_text.delta') yield event.delta;
+      if (event.type === 'response.completed') completed = true;
+      if (
+        event.type === 'response.incomplete' ||
+        event.type === 'response.failed' ||
+        event.type === 'error'
+      )
+        throw new Error('OpenAI response did not complete');
+    }
+    if (!completed) throw new Error('OpenAI response ended before completion');
   } else {
     const client = new GoogleGenAI({ apiKey: key });
     const stream = await client.models.generateContentStream({

@@ -8,7 +8,9 @@ describe('websocket proxy', () => {
   const server = createServer();
   let port: number;
   beforeAll(async () => {
-    attachSttProxy(server);
+    attachSttProxy(server, () => {
+      throw new Error('fixture connection setup failure');
+    });
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');
     port = (server.address() as { port: number }).port;
@@ -38,41 +40,13 @@ describe('websocket proxy', () => {
     const [code] = await once(socket, 'close');
     expect(code).toBe(1008);
   });
-});
-
-describe('websocket transcription flow', () => {
-  it('forwards PCM and manual commits and returns normalized transcript events', async () => {
-    const { WebSocketServer } = await import('ws');
-    const fake = new WebSocketServer({ port: 0, host: '127.0.0.1' });
-    await once(fake, 'listening');
-    const upstreamPort = (fake.address() as { port: number }).port;
-    const server = createServer();
-    attachSttProxy(server, () => new WebSocket(`ws://127.0.0.1:${upstreamPort}`));
-    server.listen(0, '127.0.0.1');
-    await once(server, 'listening');
-    const port = (server.address() as { port: number }).port;
-    const frames: Record<string, unknown>[] = [];
-    fake.on('connection', (upstream) =>
-      upstream.on('message', (payload) => {
-        const frame = JSON.parse(payload.toString());
-        frames.push(frame);
-        if (frame.type === 'session.update')
-          upstream.send(JSON.stringify({ type: 'session.updated' }));
-        if (frame.type === 'input_audio_buffer.commit')
-          upstream.send(
-            JSON.stringify({
-              type: 'conversation.item.input_audio_transcription.completed',
-              item_id: 'one',
-              transcript: 'Hello',
-            }),
-          );
-      }),
-    );
+  it('returns a client error when the provider connection could not be created', async () => {
     const socket = new WebSocket(`ws://127.0.0.1:${port}/ws/stt`, {
       origin: `http://127.0.0.1:${port}`,
     });
     await once(socket, 'open');
-    const ready = once(socket, 'message');
+    const message = once(socket, 'message');
+    const closed = once(socket, 'close');
     socket.send(
       JSON.stringify({
         type: 'session.start',
@@ -83,27 +57,93 @@ describe('websocket transcription flow', () => {
         apiKey: 'test-key',
       }),
     );
-    expect(JSON.parse((await ready)[0].toString())).toMatchObject({ type: 'session.ready' });
-    const final = once(socket, 'message');
-    socket.send(JSON.stringify({ type: 'audio.chunk', pcm16Base64: 'AQI=' }));
-    socket.send(JSON.stringify({ type: 'audio.commit' }));
-    expect(JSON.parse((await final)[0].toString())).toMatchObject({
-      type: 'transcript.final',
-      text: 'Hello',
-      track: 'mic',
+    expect(JSON.parse((await message)[0].toString())).toMatchObject({
+      type: 'error',
+      code: 'provider_error',
+      recoverable: false,
     });
-    expect(frames).toContainEqual({ type: 'input_audio_buffer.append', audio: 'AQI=' });
-    expect(frames).toContainEqual({ type: 'input_audio_buffer.commit' });
-    expect(JSON.stringify(frames)).not.toContain('test-key');
-    socket.close();
-    await once(socket, 'close');
-    await new Promise<void>((resolve, reject) =>
-      server.close((error) => (error ? reject(error) : resolve())),
-    );
-    await new Promise<void>((resolve, reject) =>
-      fake.close((error) => (error ? reject(error) : resolve())),
-    );
+    expect((await closed)[0]).toBe(1008);
   });
+});
+
+describe('websocket transcription flow', () => {
+  it.each(['gpt-live-transcribe', 'gpt-4o-transcribe'])(
+    'finalizes trailing audio for %s',
+    async (model) => {
+      const { WebSocketServer } = await import('ws');
+      const fake = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+      await once(fake, 'listening');
+      const upstreamPort = (fake.address() as { port: number }).port;
+      const server = createServer();
+      attachSttProxy(server, () => new WebSocket(`ws://127.0.0.1:${upstreamPort}`));
+      server.listen(0, '127.0.0.1');
+      await once(server, 'listening');
+      const port = (server.address() as { port: number }).port;
+      const frames: Record<string, unknown>[] = [];
+      fake.on('connection', (upstream) =>
+        upstream.on('message', (payload) => {
+          const frame = JSON.parse(payload.toString());
+          frames.push(frame);
+          if (frame.type === 'session.update')
+            upstream.send(JSON.stringify({ type: 'session.updated' }));
+          if (
+            frame.type === 'input_audio_buffer.commit' ||
+            (frame.type === 'input_audio_buffer.append' && frame.audio !== 'AQI=')
+          )
+            upstream.send(
+              JSON.stringify({
+                type: 'conversation.item.input_audio_transcription.completed',
+                item_id: 'one',
+                transcript: 'Hello',
+              }),
+            );
+        }),
+      );
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/ws/stt`, {
+        origin: `http://127.0.0.1:${port}`,
+      });
+      await once(socket, 'open');
+      const ready = once(socket, 'message');
+      socket.send(
+        JSON.stringify({
+          type: 'session.start',
+          provider: 'openai',
+          model,
+          sampleRate: 24000,
+          track: 'mic',
+          apiKey: 'test-key',
+        }),
+      );
+      expect(JSON.parse((await ready)[0].toString())).toMatchObject({ type: 'session.ready' });
+      const final = once(socket, 'message');
+      socket.send(JSON.stringify({ type: 'audio.chunk', pcm16Base64: 'AQI=' }));
+      socket.send(JSON.stringify({ type: 'audio.commit' }));
+      socket.send(JSON.stringify({ type: 'audio.end' }));
+      expect(JSON.parse((await final)[0].toString())).toMatchObject({
+        type: 'transcript.final',
+        text: 'Hello',
+        track: 'mic',
+      });
+      expect(frames).toContainEqual({ type: 'input_audio_buffer.append', audio: 'AQI=' });
+      if (model === 'gpt-live-transcribe') {
+        expect(frames).toHaveLength(3);
+        expect(frames[2]).toEqual({ type: 'input_audio_buffer.commit' });
+      } else {
+        expect(frames).toHaveLength(3);
+        expect(frames[2].type).toBe('input_audio_buffer.append');
+        expect(Buffer.from(String(frames[2].audio), 'base64')).toEqual(Buffer.alloc(28_800));
+      }
+      expect(JSON.stringify(frames)).not.toContain('test-key');
+      socket.close();
+      await once(socket, 'close');
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+      await new Promise<void>((resolve, reject) =>
+        fake.close((error) => (error ? reject(error) : resolve())),
+      );
+    },
+  );
 });
 
 describe('Gemini websocket transcription', () => {

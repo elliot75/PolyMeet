@@ -25,11 +25,16 @@ describe('audio worklet', () => {
     const processor = new Processor({ processorOptions: { targetRate: 16000 } });
     const samples = new Float32Array(48000 * 2);
     samples.fill(0.2, 0, 48000);
+    const leftChannel = new Float32Array(128);
     for (let offset = 0; offset < samples.length; offset += 128)
-      processor.process([[samples.subarray(offset, offset + 128)]]);
+      processor.process([[leftChannel, samples.subarray(offset, offset + 128)]]);
+    processor.port.onmessage({ data: { type: 'flush', id: 'test-flush' } });
     const packets = events.filter((event) => event.type === 'audio');
-    expect(packets.length).toBeGreaterThanOrEqual(19);
+    expect(packets.reduce((bytes, event) => bytes + (event.buffer?.byteLength ?? 0), 0)).toBe(
+      64000,
+    );
     expect(packets[0].buffer?.byteLength).toBe(3200);
+    expect(new Int16Array(packets[0].buffer!)[0]).toBe(3276);
     expect(events.filter((event) => event.type === 'speech.start')).toHaveLength(1);
     expect(events.filter((event) => event.type === 'commit')).toHaveLength(1);
     expect(events.findIndex((event) => event.type === 'speech.start')).toBeLessThan(

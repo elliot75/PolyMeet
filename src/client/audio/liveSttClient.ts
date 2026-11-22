@@ -1,8 +1,8 @@
-import type { SttServerEvent, SttStart } from '../../shared/protocol';
+import type { SttClientMessage, SttServerEvent, SttStart } from '../../shared/protocol';
 
 const MAX_BUFFERED_PACKETS = 3000;
 
-type Outgoing = { type: 'audio.chunk'; pcm16Base64: string } | { type: 'audio.commit' };
+type Outgoing = Extract<SttClientMessage, { type: `audio.${string}` }>;
 export class LiveSttClient {
   private socket?: WebSocket;
   private stopped = false;
@@ -44,6 +44,7 @@ export class LiveSttClient {
       if (event.type === 'transcript.committed') {
         const batch = this.committed.find((item) => !item.id);
         if (batch) batch.id = event.segmentId;
+        this.awaitingFinal.add(`${this.connectionId}:${event.segmentId}`);
         return;
       }
       // The close event owns recovery, including invalidating the old interims.
@@ -149,6 +150,11 @@ export class LiveSttClient {
       this.queue.push({ type: 'audio.commit' });
       this.pump();
     }
+  }
+  endInput() {
+    if (this.stopped || this.start.provider !== 'openai') return;
+    this.queue.push({ type: 'audio.end' });
+    this.pump();
   }
   async drain(timeoutMs = 10000): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
