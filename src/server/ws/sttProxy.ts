@@ -18,7 +18,11 @@ function connectProvider(start: SttStart, key: string): WebSocket {
     start.provider === 'openai' ? { headers: { Authorization: `Bearer ${key}` } } : {},
   );
 }
-export function attachSttProxy(server: Server, connect: UpstreamFactory = connectProvider) {
+export function attachSttProxy(
+  server: Server,
+  connect: UpstreamFactory = connectProvider,
+  upstreamReadyTimeoutMs = 10_000,
+) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024 });
   server.on('upgrade', (request, socket, head) => {
     const origin = request.headers.origin;
@@ -35,17 +39,35 @@ export function attachSttProxy(server: Server, connect: UpstreamFactory = connec
       closing = false,
       manualCommit = false,
       provider: 'openai' | 'gemini' = 'openai';
+    let upstreamReadyTimeout: ReturnType<typeof setTimeout> | undefined;
     const send = (event: SttServerEvent) => {
       if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(event));
     };
+    const cleanup = () => {
+      if (closing) return;
+      closing = true;
+      clearTimeout(startTimeout);
+      clearTimeout(upstreamReadyTimeout);
+      if (ready) upstream?.close();
+      else upstream?.terminate();
+    };
+    const close = (code: number) => {
+      cleanup();
+      client.close(code);
+    };
     const fail = (code: string, message: string) => {
       send({ type: 'error', code, message, recoverable: false });
-      client.close(1008);
+      close(1008);
     };
-    const timeout = setTimeout(() => {
+    const reconnect = (reason: string) => {
+      send({ type: 'session.reconnecting', reason });
+      close(1012);
+    };
+    const startTimeout = setTimeout(() => {
       if (!started) fail('start_timeout', '連線逾時。');
-    }, 10000);
+    }, 10_000);
     client.on('message', (raw, binary) => {
+      if (closing) return;
       if (binary) {
         fail('invalid_message', '無效的連線訊息。');
         return;
@@ -78,7 +100,7 @@ export function attachSttProxy(server: Server, connect: UpstreamFactory = connec
           return;
         }
         started = true;
-        clearTimeout(timeout);
+        clearTimeout(startTimeout);
         const rawStart = data as SttStart;
         const start: SttStart = { ...rawStart, model: rawStart.model.trim() };
         provider = start.provider;
@@ -101,44 +123,34 @@ export function attachSttProxy(server: Server, connect: UpstreamFactory = connec
           fail('provider_error', '無法建立即時轉錄連線，請檢查 API 金鑰與設定。');
           return;
         }
+        upstreamReadyTimeout = setTimeout(() => {
+          reconnect('upstream_ready_timeout');
+        }, upstreamReadyTimeoutMs);
         const map = createEventMapper(start);
-        upstream.on('open', () =>
+        upstream.on('open', () => {
+          if (closing) return;
           upstream?.send(
             JSON.stringify(
               start.provider === 'openai' ? openAiConfiguration(start) : geminiConfiguration(start),
             ),
-          ),
-        );
+          );
+        });
         upstream.on('unexpected-response', (_req, res) => {
           res.resume();
+          if (closing) return;
           const status = res.statusCode ?? 0;
           if (status === 401 || status === 403) {
-            closing = true;
-            send({
-              type: 'error',
-              code: 'auth_failed',
-              message: '即時轉錄驗證失敗，請檢查 API 金鑰與模型權限。',
-              recoverable: false,
-            });
-            upstream?.terminate();
-            client.close(1008);
+            fail('auth_failed', '即時轉錄驗證失敗，請檢查 API 金鑰與模型權限。');
             return;
           }
           if (status === 400 || status === 404) {
-            closing = true;
-            send({
-              type: 'error',
-              code: 'provider_error',
-              message: '即時轉錄模型或請求無效，請檢查模型設定。',
-              recoverable: false,
-            });
-            upstream?.terminate();
-            client.close(1008);
+            fail('provider_error', '即時轉錄模型或請求無效，請檢查模型設定。');
             return;
           }
           upstream?.terminate();
         });
         upstream.on('message', (message) => {
+          if (closing) return;
           let parsed: Record<string, unknown>;
           try {
             parsed = JSON.parse(message.toString());
@@ -146,18 +158,17 @@ export function attachSttProxy(server: Server, connect: UpstreamFactory = connec
             return;
           }
           for (const event of map(parsed)) {
-            if (event.type === 'session.ready') ready = true;
+            if (event.type === 'session.ready') {
+              ready = true;
+              clearTimeout(upstreamReadyTimeout);
+            }
             send(event);
             if (event.type === 'session.reconnecting') {
-              closing = true;
-              client.close(1012);
-              upstream?.close();
+              close(1012);
               break;
             }
-            if (event.type === 'error') {
-              closing = true;
-              upstream?.close();
-              client.close(1008);
+            if (event.type === 'error' && !event.recoverable) {
+              close(1008);
               break;
             }
           }
@@ -172,17 +183,12 @@ export function attachSttProxy(server: Server, connect: UpstreamFactory = connec
             });
         });
         upstream.on('close', () => {
-          if (!closing && client.readyState === WebSocket.OPEN) {
-            send({ type: 'session.reconnecting', reason: 'upstream_closed' });
-            client.close(1012);
-          }
+          if (!closing) reconnect('upstream_closed');
         });
         return;
       }
       if (data?.type === 'session.stop') {
-        closing = true;
-        upstream?.close();
-        client.close(1000);
+        close(1000);
         return;
       }
       if (!ready || upstream?.readyState !== WebSocket.OPEN) return;
@@ -214,15 +220,7 @@ export function attachSttProxy(server: Server, connect: UpstreamFactory = connec
           upstream.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
       }
     });
-    client.on('close', () => {
-      closing = true;
-      clearTimeout(timeout);
-      upstream?.close();
-    });
-    client.on('error', () => {
-      closing = true;
-      clearTimeout(timeout);
-      upstream?.close();
-    });
+    client.on('close', cleanup);
+    client.on('error', cleanup);
   });
 }

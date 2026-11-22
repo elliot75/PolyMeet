@@ -64,6 +64,29 @@ describe('translation queue', () => {
     expect(updates[1]).toEqual({ id: 's1', text: 'ok', final: true });
   });
 
+  it('bounds the wait for final translations before a reload and cancels the remaining work', async () => {
+    let signal: AbortSignal | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string, init?: RequestInit) => {
+        signal = init?.signal ?? undefined;
+        return new Promise((_resolve, reject) => {
+          signal?.addEventListener('abort', () =>
+            reject(new DOMException('Aborted', 'AbortError')),
+          );
+        });
+      }),
+    );
+    const onError = vi.fn();
+    const queue = new TranslationQueue(defaults, '繁體中文', 'English', vi.fn(), onError);
+    queue.add(makeSegment('s1', 'first'));
+    queue.add(makeSegment('s2', 'second'));
+    await queue.finish(5);
+    expect(signal?.aborted).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   it('cancels active translation without triggering onError', async () => {
     let capturedSignal: AbortSignal | undefined;
     vi.stubGlobal(

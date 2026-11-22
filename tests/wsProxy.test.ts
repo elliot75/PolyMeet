@@ -1,8 +1,9 @@
 import { createServer } from 'node:http';
-import { once } from 'node:events';
-import WebSocket from 'ws';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { on, once } from 'node:events';
+import WebSocket, { WebSocketServer } from 'ws';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { attachSttProxy } from '../src/server/ws/sttProxy';
+import type { SttServerEvent } from '../src/shared/protocol';
 
 describe('websocket proxy', () => {
   const server = createServer();
@@ -63,6 +64,140 @@ describe('websocket proxy', () => {
       recoverable: false,
     });
     expect((await closed)[0]).toBe(1008);
+  });
+});
+
+describe('websocket setup and recovery', () => {
+  const readyTimeoutMs = 50;
+  let fake: WebSocketServer;
+  let proxy: ReturnType<typeof createServer>;
+  let client: WebSocket;
+
+  beforeEach(async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    fake = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+    await once(fake, 'listening');
+    const upstreamPort = (fake.address() as { port: number }).port;
+    proxy = createServer();
+    attachSttProxy(proxy, () => new WebSocket(`ws://127.0.0.1:${upstreamPort}`), readyTimeoutMs);
+    proxy.listen(0, '127.0.0.1');
+    await once(proxy, 'listening');
+    const proxyPort = (proxy.address() as { port: number }).port;
+    client = new WebSocket(`ws://127.0.0.1:${proxyPort}/ws/stt`, {
+      origin: `http://127.0.0.1:${proxyPort}`,
+    });
+    await once(client, 'open');
+  });
+
+  afterEach(async () => {
+    client?.terminate();
+    for (const upstream of fake.clients) upstream.terminate();
+    await Promise.all([
+      new Promise<void>((resolve, reject) =>
+        proxy.close((error) => (error ? reject(error) : resolve())),
+      ),
+      new Promise<void>((resolve, reject) =>
+        fake.close((error) => (error ? reject(error) : resolve())),
+      ),
+    ]);
+    vi.useRealTimers();
+  });
+
+  async function startSession() {
+    const setup = once(fake, 'connection').then(async ([upstream]: [WebSocket]) => {
+      const [payload] = await once(upstream, 'message');
+      expect(JSON.parse(payload.toString())).toMatchObject({ type: 'session.update' });
+      return upstream;
+    });
+    client.send(
+      JSON.stringify({
+        type: 'session.start',
+        provider: 'openai',
+        model: 'gpt-live-transcribe',
+        sampleRate: 24000,
+        track: 'mic',
+        apiKey: 'test-key',
+      }),
+    );
+    return setup;
+  }
+
+  it('retries when the upstream opens but never acknowledges setup', async () => {
+    const events: SttServerEvent[] = [];
+    client.on('message', (data) => events.push(JSON.parse(data.toString())));
+    const upstream = await startSession();
+    const clientClosed = once(client, 'close');
+    const upstreamClosed = once(upstream, 'close');
+
+    vi.advanceTimersByTime(readyTimeoutMs);
+
+    expect((await clientClosed)[0]).toBe(1012);
+    await upstreamClosed;
+    expect(events).toEqual([{ type: 'session.reconnecting', reason: 'upstream_ready_timeout' }]);
+  });
+
+  it('keeps forwarding audio and transcripts after an upstream item fails', async () => {
+    const upstream = await startSession();
+    const events = on(client, 'message', { close: ['close'] });
+    const nextEvent = async (): Promise<SttServerEvent | undefined> => {
+      const { value } = await events.next();
+      return value && JSON.parse(value[0].toString());
+    };
+    const sendAudio = async () => {
+      const audio = once(upstream, 'message');
+      client.send(JSON.stringify({ type: 'audio.chunk', pcm16Base64: 'AQI=' }));
+      expect(JSON.parse((await audio)[0].toString())).toEqual({
+        type: 'input_audio_buffer.append',
+        audio: 'AQI=',
+      });
+    };
+    upstream.send(JSON.stringify({ type: 'session.updated' }));
+    expect(await nextEvent()).toMatchObject({ type: 'session.ready' });
+    vi.advanceTimersByTime(readyTimeoutMs);
+    await sendAudio();
+
+    upstream.send(
+      JSON.stringify({
+        type: 'conversation.item.input_audio_transcription.delta',
+        item_id: 'failed-item',
+        delta: 'Partial text',
+      }),
+    );
+    upstream.send(
+      JSON.stringify({
+        type: 'conversation.item.input_audio_transcription.failed',
+        item_id: 'failed-item',
+        error: { message: 'private provider error' },
+      }),
+    );
+    expect(await nextEvent()).toMatchObject({ type: 'transcript.interim', text: 'Partial text' });
+    expect(await nextEvent()).toEqual({
+      type: 'transcript.final',
+      segmentId: 'failed-item',
+      text: '',
+      track: 'mic',
+    });
+    expect(await nextEvent()).toEqual({
+      type: 'error',
+      code: 'transcript_failed',
+      message: '這段音訊轉錄失敗，即時轉錄會繼續。',
+      recoverable: true,
+    });
+
+    await sendAudio();
+    upstream.send(
+      JSON.stringify({
+        type: 'conversation.item.input_audio_transcription.completed',
+        item_id: 'next-item',
+        transcript: 'Transcription continues',
+      }),
+    );
+    expect(await nextEvent()).toEqual({
+      type: 'transcript.final',
+      segmentId: 'next-item',
+      text: 'Transcription continues',
+      track: 'mic',
+    });
   });
 });
 

@@ -23,8 +23,9 @@ export function ProjectionOverlay({
   const [opened, setOpened] = useState(false);
   const timer = useRef<number | undefined>(undefined);
 
-  const latest = segments.at(-1);
-  const previous = segments.at(-2);
+  const finalized = segments.filter((segment) => segment.isFinal);
+  const latest = finalized.at(-1);
+  const previous = finalized.at(-2);
 
   useEffect(() => {
     if (opened && textArea.current) {

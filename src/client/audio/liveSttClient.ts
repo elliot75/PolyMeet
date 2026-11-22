@@ -1,8 +1,13 @@
 import type { SttClientMessage, SttServerEvent, SttStart } from '../../shared/protocol';
 
 const MAX_BUFFERED_PACKETS = 3000;
+const READY_TIMEOUT_MS = 15000;
+const PRE_ROLL_MS = 500;
 
-type Outgoing = Extract<SttClientMessage, { type: `audio.${string}` }>;
+type AudioMessage = Extract<SttClientMessage, { type: 'audio.chunk' }>;
+type Outgoing =
+  | { wire: AudioMessage; quiet: boolean; bytes: number; speechStart: boolean }
+  | { wire: Extract<SttClientMessage, { type: 'audio.commit' | 'audio.end' }> };
 export class LiveSttClient {
   private socket?: WebSocket;
   private stopped = false;
@@ -10,6 +15,8 @@ export class LiveSttClient {
   private retry = 0;
   private timer?: number;
   private pumpTimer?: number;
+  private readyTimer?: number;
+  private preRoll: AudioMessage[] = [];
   private queue: Outgoing[] = [];
   private sent: Outgoing[] = [];
   private committed: { messages: Outgoing[]; id?: string }[] = [];
@@ -28,8 +35,16 @@ export class LiveSttClient {
       `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/stt`,
     );
     this.socket = socket;
-    socket.onopen = () => socket.send(JSON.stringify(this.start));
+    let reason = 'connection_lost';
+    this.readyTimer = window.setTimeout(() => {
+      reason = 'readiness_timeout';
+      socket.close();
+    }, READY_TIMEOUT_MS);
+    socket.onopen = () => {
+      if (!this.stopped && this.socket === socket) socket.send(JSON.stringify(this.start));
+    };
     socket.onmessage = (message) => {
+      if (this.stopped || this.socket !== socket) return;
       let event: SttServerEvent;
       try {
         event = JSON.parse(message.data) as SttServerEvent;
@@ -37,8 +52,13 @@ export class LiveSttClient {
         return;
       }
       if (event.type === 'session.ready') {
+        if (this.ready) return;
+        window.clearTimeout(this.readyTimer);
         this.ready = true;
         this.retry = 0;
+        // Only quiet, already acknowledged context is replayed ahead of pending audio.
+        // Never resend finalized words just to provide pre-roll.
+        for (const packet of this.preRoll) socket.send(JSON.stringify(packet));
         this.pump();
       }
       if (event.type === 'transcript.committed') {
@@ -47,8 +67,11 @@ export class LiveSttClient {
         this.awaitingFinal.add(`${this.connectionId}:${event.segmentId}`);
         return;
       }
-      // The close event owns recovery, including invalidating the old interims.
-      if (event.type === 'session.reconnecting') return;
+      if (event.type === 'session.reconnecting') {
+        reason = event.reason;
+        socket.close();
+        return;
+      }
       if (event.type === 'transcript.final' || event.type === 'transcript.interim') {
         const providerId = event.segmentId;
         event.segmentId = `${this.connectionId}:${event.segmentId}`;
@@ -56,9 +79,19 @@ export class LiveSttClient {
         else {
           this.awaitingFinal.delete(event.segmentId);
           const matching = this.committed.findIndex((batch) => batch.id === providerId);
-          if (matching >= 0) this.committed.splice(matching, 1);
-          else if (this.committed[0] && !this.committed[0].id) this.committed.shift();
-          else if (!this.committed.length) this.sent = [];
+          if (matching >= 0) this.savePreRoll(this.committed.splice(matching, 1)[0].messages);
+          else if (this.committed[0] && !this.committed[0].id)
+            this.savePreRoll(this.committed.shift()!.messages);
+          else if (!this.committed.length) {
+            // A provider can finalize before our worklet's next commit. Keep the
+            // next locally detected utterance if it has already started.
+            let speechStarts = 0;
+            const nextSpeech = this.sent.findIndex(
+              (packet) => 'speechStart' in packet && packet.speechStart && ++speechStarts === 2,
+            );
+            this.savePreRoll(nextSpeech < 0 ? this.sent : this.sent.slice(0, nextSpeech));
+            this.sent = nextSpeech < 0 ? [] : this.sent.slice(nextSpeech);
+          }
           this.pendingSpeech = Math.max(0, this.pendingSpeech - 1);
         }
       }
@@ -71,7 +104,10 @@ export class LiveSttClient {
       this.onEvent(event);
     };
     socket.onclose = () => {
+      if (this.socket !== socket) return;
+      this.socket = undefined;
       this.ready = false;
+      window.clearTimeout(this.readyTimer);
       window.clearTimeout(this.pumpTimer);
       if (!this.stopped) {
         const replay = this.committed.flatMap((batch) => batch.messages);
@@ -84,7 +120,7 @@ export class LiveSttClient {
         this.awaitingFinal.clear();
         this.onEvent({
           type: 'session.reconnecting',
-          reason: 'connection_lost',
+          reason,
           track: this.start.track,
           discardedInterims,
         });
@@ -102,9 +138,9 @@ export class LiveSttClient {
     let count = 0;
     while (this.queue.length && count++ < 5 && this.socket.bufferedAmount < 256 * 1024) {
       const message = this.queue.shift()!;
-      this.socket.send(JSON.stringify(message));
+      this.socket.send(JSON.stringify(message.wire));
       this.sent.push(message);
-      if (message.type === 'audio.commit') {
+      if (message.wire.type === 'audio.commit') {
         this.committed.push({ messages: this.sent });
         this.sent = [];
       }
@@ -119,7 +155,26 @@ export class LiveSttClient {
     }
     if (this.queue.length) this.pumpTimer = window.setTimeout(() => this.pump(), 20);
   }
-  audio(buffer: ArrayBuffer) {
+  private savePreRoll(packets: Outgoing[]) {
+    let bytesLeft = (this.start.sampleRate * 2 * PRE_ROLL_MS) / 1000;
+    const tail: AudioMessage[] = [];
+    for (let i = packets.length - 1; i >= 0 && bytesLeft > 0; i--) {
+      const packet = packets[i];
+      if (!('quiet' in packet)) continue;
+      if (!packet.quiet) break;
+      tail.push(
+        packet.bytes <= bytesLeft
+          ? packet.wire
+          : {
+              type: 'audio.chunk',
+              pcm16Base64: btoa(atob(packet.wire.pcm16Base64).slice(-bytesLeft)),
+            },
+      );
+      bytesLeft -= packet.bytes;
+    }
+    this.preRoll = tail.reverse();
+  }
+  audio(buffer: ArrayBuffer, level = 1, speechStart = false) {
     if (this.stopped) return;
     const bytes = new Uint8Array(buffer);
     const CHUNK = 0x8000;
@@ -127,7 +182,15 @@ export class LiveSttClient {
     for (let i = 0; i < bytes.length; i += CHUNK) {
       parts.push(String.fromCharCode(...bytes.subarray(i, i + CHUNK)));
     }
-    this.queue.push({ type: 'audio.chunk', pcm16Base64: btoa(parts.join('')) });
+    this.enqueue({
+      wire: { type: 'audio.chunk', pcm16Base64: btoa(parts.join('')) },
+      quiet: level <= 0.012,
+      bytes: buffer.byteLength,
+      speechStart,
+    });
+  }
+  private enqueue(packet: Outgoing) {
+    this.queue.push(packet);
     if (this.queue.length > MAX_BUFFERED_PACKETS) {
       this.queue.shift();
       this.reportBufferLoss();
@@ -146,15 +209,11 @@ export class LiveSttClient {
     if (!this.stopped) this.pendingSpeech++;
   }
   commit() {
-    if (!this.stopped) {
-      this.queue.push({ type: 'audio.commit' });
-      this.pump();
-    }
+    if (!this.stopped) this.enqueue({ wire: { type: 'audio.commit' } });
   }
   endInput() {
     if (this.stopped || this.start.provider !== 'openai') return;
-    this.queue.push({ type: 'audio.end' });
-    this.pump();
+    this.enqueue({ wire: { type: 'audio.end' } });
   }
   async drain(timeoutMs = 10000): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
@@ -181,6 +240,8 @@ export class LiveSttClient {
     this.stopped = true;
     window.clearTimeout(this.timer);
     window.clearTimeout(this.pumpTimer);
+    window.clearTimeout(this.readyTimer);
+    this.preRoll = [];
     this.queue = [];
     this.committed = [];
     this.sent = [];

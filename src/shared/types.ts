@@ -13,6 +13,7 @@ export interface TranscriptSegment {
   endedAtMs?: number;
   text: string;
   translation?: string;
+  translationIsFinal?: boolean;
   isFinal: boolean;
 }
 export interface MinutesRecord {

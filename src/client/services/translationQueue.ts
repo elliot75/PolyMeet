@@ -63,6 +63,21 @@ export class TranslationQueue {
     });
   }
 
+  async finish(timeoutMs: number) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        this.queue,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, timeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+      this.cancel();
+    }
+  }
+
   cancel() {
     this.aborted = true;
     this.currentController?.abort();

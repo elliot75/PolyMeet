@@ -27,9 +27,14 @@ describe('translation persistence', () => {
     };
     await saveSegment(segment);
     await saveSegment({ ...segment, text: 'corrected' });
-    await updateSegmentTranslation(segment.id, 'translated');
+    await updateSegmentTranslation(segment.id, 'draft', false);
     expect(await listSegments(segment.meetingId)).toMatchObject([
-      { text: 'corrected', translation: 'translated' },
+      { text: 'corrected', translation: 'draft', translationIsFinal: false },
+    ]);
+    await updateSegmentTranslation(segment.id, 'translated');
+    await updateSegmentTranslation(segment.id, 'late draft', false);
+    expect(await listSegments(segment.meetingId)).toMatchObject([
+      { text: 'corrected', translation: 'translated', translationIsFinal: true },
     ]);
   });
 });
