@@ -164,6 +164,18 @@ export async function saveSegments(
     throw error;
   }
 }
+export async function saveInterimSegment(segment: TranscriptSegment): Promise<void> {
+  const tx = (await db()).transaction(['recordings', 'segments'], 'readwrite');
+  const store = tx.objectStore('segments');
+  const [recording, previous] = await Promise.all([
+    segment.recordingId ? tx.objectStore('recordings').get(segment.recordingId) : undefined,
+    store.get(segment.id),
+  ]);
+  if (recording?.meetingId === segment.meetingId && !previous?.isFinal)
+    await store.put({ ...segment, isFinal: false });
+  await tx.done;
+}
+
 export async function listSegments(meetingId: string): Promise<TranscriptSegment[]> {
   const database = await db();
   const [segments, recordings] = await Promise.all([
@@ -178,11 +190,16 @@ export async function listSegments(meetingId: string): Promise<TranscriptSegment
   );
 }
 
-export async function updateSegmentTranslation(id: string, translation: string): Promise<void> {
+export async function updateSegmentTranslation(
+  id: string,
+  translation: string,
+  isFinal = true,
+): Promise<void> {
   const database = await db();
   const tx = database.transaction('segments', 'readwrite');
   const segment = await tx.store.get(id);
-  if (segment) await tx.store.put({ ...segment, translation });
+  if (segment && (isFinal || !segment.translation || segment.translationIsFinal === false))
+    await tx.store.put({ ...segment, translation, translationIsFinal: isFinal });
   await tx.done;
 }
 

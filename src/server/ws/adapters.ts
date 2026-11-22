@@ -96,12 +96,15 @@ export function createEventMapper(start: SttStart) {
       if (data.type === 'conversation.item.input_audio_transcription.failed') {
         const id = String(data.item_id || 'current');
         partial.delete(id);
-        events.push({
-          type: 'transcript.final',
-          segmentId: id,
-          text: '',
-          track: start.track,
-        });
+        events.push(
+          { type: 'transcript.final', segmentId: id, text: '', track: start.track },
+          {
+            type: 'error',
+            code: 'transcript_failed',
+            message: '這段音訊轉錄失敗，即時轉錄會繼續。',
+            recoverable: true,
+          },
+        );
       }
       if (data.type === 'error')
         events.push({

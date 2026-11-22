@@ -104,13 +104,24 @@ describe('transcription adapters', () => {
       map({
         type: 'conversation.item.input_audio_transcription.failed',
         item_id: 'failed-item',
+        error: { message: 'private provider error' },
+      }),
+    ).toEqual([
+      { type: 'transcript.final', segmentId: 'failed-item', text: '', track: 'mic' },
+      {
+        type: 'error',
+        code: 'transcript_failed',
+        message: '這段音訊轉錄失敗，即時轉錄會繼續。',
+        recoverable: true,
+      },
+    ]);
+    expect(
+      map({
+        type: 'conversation.item.input_audio_transcription.delta',
+        item_id: 'failed-item',
+        delta: 'new text',
       })[0],
-    ).toEqual({
-      type: 'transcript.final',
-      segmentId: 'failed-item',
-      text: '',
-      track: 'mic',
-    });
+    ).toMatchObject({ type: 'transcript.interim', text: 'new text' });
     for (let i = 0; i < 201; i++) {
       map({
         type: 'conversation.item.input_audio_transcription.delta',

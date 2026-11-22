@@ -33,7 +33,7 @@ export class LiveCapture {
       source.connect(node).connect(silence).connect(context.destination);
       node.port.onmessage = ({ data }) => {
         if (data.type === 'audio') {
-          client.audio(data.buffer);
+          client.audio(data.buffer, data.level, data.speechStart);
           onLevel?.(track.role, data.level);
         } else if (data.type === 'commit') client.commit();
         else if (data.type === 'speech.start') {
@@ -79,25 +79,28 @@ export class LiveCapture {
     await this.context?.resume();
   }
   async stop() {
-    await this.pause();
-    const drained = await Promise.all(this.clients.map((client) => client.drain()));
-    if (drained.some((ok) => !ok))
-      this.onEvent?.({
-        type: 'error',
-        code: 'audio_unsent',
-        message: '部分音訊尚未轉錄；可下載本機錄音後上傳補轉。',
-        recoverable: true,
-      });
-    const finalized = await Promise.all(this.clients.map((client) => client.waitForFinal()));
-    if (finalized.some((ok) => !ok))
-      this.onEvent?.({
-        type: 'error',
-        code: 'audio_unsent',
-        message: '最後一段逐字稿尚未完成；可下載本機錄音後上傳補轉。',
-        recoverable: true,
-      });
-    for (const client of this.clients) client.stop();
-    for (const node of this.nodes) node.disconnect();
-    await this.context?.close();
+    try {
+      await this.pause();
+      const drained = await Promise.all(this.clients.map((client) => client.drain()));
+      if (drained.some((ok) => !ok))
+        this.onEvent?.({
+          type: 'error',
+          code: 'audio_unsent',
+          message: '部分音訊尚未轉錄；可下載本機錄音後上傳補轉。',
+          recoverable: true,
+        });
+      const finalized = await Promise.all(this.clients.map((client) => client.waitForFinal()));
+      if (finalized.some((ok) => !ok))
+        this.onEvent?.({
+          type: 'error',
+          code: 'audio_unsent',
+          message: '最後一段逐字稿尚未完成；可下載本機錄音後上傳補轉。',
+          recoverable: true,
+        });
+    } finally {
+      for (const client of this.clients) client.stop();
+      for (const node of this.nodes) node.disconnect();
+      if (this.context?.state !== 'closed') await this.context?.close();
+    }
   }
 }

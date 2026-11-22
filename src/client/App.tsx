@@ -18,6 +18,7 @@ import {
   listSegments,
   migrateMeetings,
   deleteMeeting,
+  saveInterimSegment,
   saveSegment,
   updateSegmentTranslation,
   saveAudioChunk,
@@ -45,6 +46,18 @@ import {
 
 type AudioLevels = { mic: number; system: number };
 type LevelSubscriber = (levels: AudioLevels) => void;
+
+const AUDIO_SLICE_MS = 1000;
+const SELECTED_MEETING_KEY = 'polymeet-selected-meeting';
+
+function checkpointAudio(recorder: MediaRecorder | null) {
+  if (!recorder || recorder.state === 'inactive') return;
+  try {
+    recorder.requestData();
+  } catch {
+    // Stopping may race with a visibility or pause checkpoint.
+  }
+}
 
 const WAVE_WEIGHTS = [0.38, 0.68, 0.52, 0.94, 0.8, 0.62, 0.88, 0.48, 0.35];
 
@@ -214,6 +227,9 @@ export function App() {
   const meetingsRef = useRef<Meeting[]>([]);
   meetingsRef.current = meetings;
   const recorder = useRef<MediaRecorder | null>(null);
+  const recordingSettled = useRef<Promise<boolean> | null>(null);
+  const reloadRequested = useRef(false);
+  const allowSavedReload = useRef(false);
   const streams = useRef<MediaStream[]>([]);
   const liveCapture = useRef<LiveCapture | null>(null);
   const mixContext = useRef<AudioContext | null>(null);
@@ -296,7 +312,13 @@ export function App() {
       const saved = await listMeetings();
       if (active) {
         setMeetings(saved);
-        setSelected(saved[0]?.id ?? null);
+        let previous: string | null = null;
+        try {
+          previous = sessionStorage.getItem(SELECTED_MEETING_KEY);
+        } catch {
+          // Session storage is optional; the meetings themselves are in IndexedDB.
+        }
+        setSelected(saved.find((item) => item.id === previous)?.id ?? saved[0]?.id ?? null);
       }
     })().catch(() => {
       if (active) setError('無法讀取本機資料。請確認瀏覽器允許儲存空間，然後重新整理。');
@@ -315,6 +337,11 @@ export function App() {
     setTranslationStatus('');
     setError('');
     if (selected) {
+      try {
+        sessionStorage.setItem(SELECTED_MEETING_KEY, selected);
+      } catch {
+        // Some browser configurations disable session storage.
+      }
       listSegments(selected)
         .then((items) => {
           if (active) setSegments(items);
@@ -392,23 +419,20 @@ export function App() {
   useEffect(() => {
     if (!recording && !savingRecording) return;
     const warn = (event: BeforeUnloadEvent) => {
+      if (allowSavedReload.current) return;
       event.preventDefault();
       event.returnValue = ' ';
     };
+    const checkpoint = () => checkpointAudio(recorder.current);
     const saveOnHidden = () => {
-      const current = recorder.current;
-      if (document.visibilityState === 'hidden' && current && current.state !== 'inactive') {
-        try {
-          current.requestData();
-        } catch {
-          /* The recorder may have just stopped. */
-        }
-      }
+      if (document.visibilityState === 'hidden') checkpoint();
     };
     window.addEventListener('beforeunload', warn);
+    window.addEventListener('pagehide', checkpoint);
     document.addEventListener('visibilitychange', saveOnHidden);
     return () => {
       window.removeEventListener('beforeunload', warn);
+      window.removeEventListener('pagehide', checkpoint);
       document.removeEventListener('visibilitychange', saveOnHidden);
     };
   }, [recording, savingRecording]);
@@ -520,6 +544,31 @@ export function App() {
         pausedDuration = 0;
       recordingClockRef.current = { startedAtMs: startedAt, pausedAccumMs: 0, pausedAtMs: 0 };
       const timeline = new SegmentTimeline();
+      const transcriptWrites = new Set<Promise<void>>();
+      let transcriptSaveFailed = false;
+      const persistTranscript = (operation: Promise<void>) => {
+        const write = operation.catch(() => {
+          transcriptSaveFailed = true;
+          setError('無法保存逐字稿或譯文，請檢查儲存空間。');
+        });
+        transcriptWrites.add(write);
+        void write.then(() => transcriptWrites.delete(write));
+        return write;
+      };
+      const makeSegment = (
+        anchor: { id: string; startedAtMs: number },
+        track: AudioTrackRole,
+        text: string,
+        isFinal: boolean,
+      ): TranscriptSegment => ({
+        ...anchor,
+        meetingId: saved.meetingId,
+        recordingId: saved.id,
+        track,
+        speakerLabel: track === 'mic' ? '我方' : '對方',
+        text,
+        isFinal,
+      });
       r.onstart = () => {
         startedAt = Date.now();
         recordingClockRef.current = { startedAtMs: startedAt, pausedAccumMs: 0, pausedAtMs: 0 };
@@ -537,6 +586,7 @@ export function App() {
           recordingClockRef.current.pausedAtMs = 0;
         }
       };
+      await saveRecording(saved);
       if (liveEnabled) {
         const translations =
           meeting.mode === '雙語會議'
@@ -548,13 +598,13 @@ export function App() {
                   if (selectedRef.current === saved.meetingId)
                     setSegments((old) =>
                       old.map((item) =>
-                        item.id === segment.id ? { ...item, translation: text } : item,
+                        item.id === segment.id
+                          ? { ...item, translation: text, translationIsFinal: final }
+                          : item,
                       ),
                     );
-                  if (final)
-                    void updateSegmentTranslation(segment.id, text).catch(() =>
-                      setError('無法保存譯文。'),
-                    );
+                  if (text.trim())
+                    void persistTranscript(updateSegmentTranslation(segment.id, text, final));
                 },
                 () => {
                   if (selectedRef.current === saved.meetingId)
@@ -568,99 +618,109 @@ export function App() {
         liveCapture.current = live;
         const provider = settings.liveProvider;
         const key = provider === 'openai' ? settings.openaiKey : settings.geminiKey;
-        await live.start(
-          [
-            { stream: mic, role: 'mic' },
-            ...(display ? [{ stream: display, role: 'system' as const }] : []),
-          ],
-          {
-            provider,
-            model: provider === 'openai' ? settings.openaiLiveModel : settings.geminiLiveModel,
-            apiKey: key || undefined,
-            languageHints: [
-              languageCode(meeting.sourceLang || '繁體中文'),
-              ...(meeting.mode === '雙語會議'
-                ? [languageCode(meeting.targetLang || 'English')]
-                : []),
-            ].filter((value): value is string => Boolean(value)),
-          },
-          (event) => {
-            if (event.type === 'session.ready') setLiveStatus('即時轉錄已連線');
-            if (event.type === 'session.reconnecting') {
-              setLiveStatus('即時轉錄重新連線中，音訊暫存在本機');
-              const discarded = event.discardedInterims ?? [];
-              if (event.track) timeline.retry(discarded, event.track);
-              setInterims((old) => {
-                const next = { ...old };
-                for (const id of discarded) delete next[id];
-                return next;
-              });
-            }
-            if (event.type === 'error') {
-              setLiveStatus(event.message);
-              if (['audio_unsent', 'audio_buffer_full'].includes(event.code) || !event.recoverable)
-                setError(event.message);
-            }
-            if (event.type === 'transcript.interim') {
-              timeline.position(
-                event.segmentId,
-                event.track,
-                Math.max(0, Date.now() - startedAt - pausedDuration),
-              );
-              setInterims((old) => ({
-                ...old,
-                [event.segmentId]: { track: event.track, text: event.text },
-              }));
-            }
-            if (event.type === 'transcript.final') {
-              setInterims((old) => {
-                const next = { ...old };
-                delete next[event.segmentId];
-                return next;
-              });
-              const position = timeline.finish(
-                event.segmentId,
-                event.track,
-                Math.max(0, (pausedAt || Date.now()) - startedAt - pausedDuration - 700),
-              );
-              if (!event.text.trim()) return;
-              const segment: TranscriptSegment = {
-                id: event.segmentId,
-                meetingId: saved.meetingId,
-                recordingId: saved.id,
-                track: event.track,
-                speakerLabel: event.track === 'mic' ? '我方' : '對方',
-                startedAtMs: position,
-                text: event.text,
-                isFinal: true,
-              };
-              void saveSegment(segment)
-                .then(() => {
-                  if (selectedRef.current === saved.meetingId)
-                    setSegments((old) => [
-                      ...old.filter((item) => item.recordingId !== saved.id),
-                      ...[
-                        ...old.filter(
-                          (item) => item.recordingId === saved.id && item.id !== segment.id,
-                        ),
-                        segment,
-                      ].sort((a, b) => a.startedAtMs - b.startedAtMs),
-                    ]);
-                  translations?.add(segment);
-                })
-                .catch(() => setError('無法保存即時逐字稿，請檢查儲存空間。'));
-            }
-          },
-          (role, level) => publishLevels({ ...levelsRef.current, [role]: level }),
-          (role) => {
-            const position = Math.max(0, Date.now() - startedAt - pausedDuration - 100);
-            timeline.noteSpeech(role, position);
-          },
-        );
         setLiveStatus('即時轉錄連線中…');
+        await live
+          .start(
+            [
+              { stream: mic, role: 'mic' },
+              ...(display ? [{ stream: display, role: 'system' as const }] : []),
+            ],
+            {
+              provider,
+              model: provider === 'openai' ? settings.openaiLiveModel : settings.geminiLiveModel,
+              apiKey: key || undefined,
+              languageHints: [
+                languageCode(meeting.sourceLang || '繁體中文'),
+                ...(meeting.mode === '雙語會議'
+                  ? [languageCode(meeting.targetLang || 'English')]
+                  : []),
+              ].filter((value): value is string => Boolean(value)),
+            },
+            (event) => {
+              if (event.type === 'session.ready') setLiveStatus('即時轉錄已連線');
+              if (event.type === 'session.reconnecting') {
+                setLiveStatus('即時轉錄重新連線中，音訊暫存在本機');
+                const discarded = event.discardedInterims ?? [];
+                if (event.track) timeline.retry(discarded, event.track);
+                setInterims((old) => {
+                  const next = { ...old };
+                  for (const id of discarded) delete next[id];
+                  return next;
+                });
+              }
+              if (event.type === 'error') {
+                setLiveStatus(event.message);
+                if (
+                  ['audio_unsent', 'audio_buffer_full', 'transcript_failed'].includes(event.code) ||
+                  !event.recoverable
+                )
+                  setError(event.message);
+              }
+              if (event.type === 'transcript.interim') {
+                const anchor = timeline.identify(
+                  event.segmentId,
+                  event.track,
+                  Math.max(0, (pausedAt || Date.now()) - startedAt - pausedDuration),
+                );
+                if (event.text.trim())
+                  void persistTranscript(
+                    saveInterimSegment(makeSegment(anchor, event.track, event.text, false)),
+                  );
+                setInterims((old) => ({
+                  ...old,
+                  [event.segmentId]: { track: event.track, text: event.text },
+                }));
+              }
+              if (event.type === 'transcript.final') {
+                setInterims((old) => {
+                  const next = { ...old };
+                  delete next[event.segmentId];
+                  return next;
+                });
+                const anchor = timeline.finish(
+                  event.segmentId,
+                  event.track,
+                  Math.max(0, (pausedAt || Date.now()) - startedAt - pausedDuration - 700),
+                );
+                if (!event.text.trim()) return;
+                const segment = makeSegment(anchor, event.track, event.text, true);
+                void persistTranscript(
+                  saveSegment(segment).then(() => {
+                    if (selectedRef.current === saved.meetingId)
+                      setSegments((old) => [
+                        ...old.filter((item) => item.recordingId !== saved.id),
+                        ...[
+                          ...old.filter(
+                            (item) => item.recordingId === saved.id && item.id !== segment.id,
+                          ),
+                          segment,
+                        ].sort((a, b) => a.startedAtMs - b.startedAtMs),
+                      ]);
+                    translations?.add(segment);
+                  }),
+                );
+              }
+            },
+            (role, level) => publishLevels({ ...levelsRef.current, [role]: level }),
+            (role) => {
+              const position = Math.max(0, Date.now() - startedAt - pausedDuration - 100);
+              timeline.noteSpeech(role, position);
+            },
+          )
+          .catch(() => {
+            void live?.stop().catch(() => {});
+            live = undefined;
+            liveCapture.current = null;
+            translations?.cancel();
+            translationQueueRef.current = null;
+            setLiveStatus('即時轉錄無法啟動，本機錄音仍會保存。');
+          });
       }
-      await saveRecording(saved);
       recorder.current = r;
+      let settleRecording: (saved: boolean) => void = () => {};
+      recordingSettled.current = new Promise((resolve) => {
+        settleRecording = resolve;
+      });
       let sequence = 0;
       let writes = Promise.resolve();
       let failed = false;
@@ -685,17 +745,25 @@ export function App() {
         setSavingRecording(true);
         setPaused(false);
         setBusy(true);
+        let savedForReload = false;
         void (async () => {
           try {
             await live?.stop();
+          } catch {
+            setError('即時轉錄未能完整結束，仍會保存本機錄音與已收到的文字。');
           } finally {
             liveCapture.current = null;
             streams.current.forEach((item) => item.getTracks().forEach((track) => track.stop()));
             streams.current = [];
-            if (mixer?.state !== 'closed') await mixer?.close();
+            if (mixer?.state !== 'closed') await mixer?.close().catch(() => {});
             mixContext.current = null;
           }
-          await writes;
+          await Promise.all([writes, ...transcriptWrites]);
+          if (reloadRequested.current) {
+            // Let recently committed transcripts get their translations without blocking reload indefinitely.
+            await translationQueueRef.current?.finish(3000);
+            await Promise.all(transcriptWrites);
+          }
           if (!failed)
             await saveRecording({
               ...saved,
@@ -705,14 +773,31 @@ export function App() {
                 Math.floor((stoppedAt - startedAt - pausedDuration) / 1000),
               ),
             });
-          const updatedRecordings = await listRecordings(saved.meetingId);
-          if (selectedRef.current === saved.meetingId) setRecordings(updatedRecordings);
+          const [updatedRecordings, savedSegments] = await Promise.all([
+            listRecordings(saved.meetingId),
+            listSegments(saved.meetingId),
+          ]);
+          if (selectedRef.current === saved.meetingId) {
+            setRecordings(updatedRecordings);
+            const drafts = savedSegments.filter(
+              (item) => item.recordingId === saved.id && !item.isFinal,
+            );
+            setSegments((items) => [
+              ...items.filter((item) => item.recordingId !== saved.id),
+              ...[...items.filter((item) => item.recordingId === saved.id), ...drafts].sort(
+                (a, b) => a.startedAtMs - b.startedAtMs,
+              ),
+            ]);
+          }
+          savedForReload = !failed && !transcriptSaveFailed;
           setLiveStatus('');
           setInterims({});
           publishLevels({ mic: 0, system: 0 });
         })()
           .catch(() => setError('無法完成錄音保存，已保存的片段仍可恢復。'))
           .finally(() => {
+            recorder.current = null;
+            settleRecording(savedForReload);
             setSavingRecording(false);
             setBusy(false);
           });
@@ -722,7 +807,7 @@ export function App() {
           if (r.state !== 'inactive') r.stop();
         };
       });
-      r.start(5000);
+      r.start(AUDIO_SLICE_MS);
       setRecording(true);
       setBusy(false);
     } catch (e) {
@@ -749,12 +834,26 @@ export function App() {
     if (recorder.current?.state !== 'inactive') recorder.current?.stop();
   }
 
+  async function saveRecordingAndReload() {
+    const settlement = recordingSettled.current;
+    if (!settlement || !recorder.current || recorder.current.state === 'inactive') return;
+    reloadRequested.current = true;
+    stop();
+    const saved = await settlement;
+    reloadRequested.current = false;
+    if (!saved) return;
+    await flushPendingSaves();
+    allowSavedReload.current = true;
+    window.location.reload();
+  }
+
   async function togglePause() {
     const r = recorder.current;
     if (!r || busy) return;
     setBusy(true);
     try {
       if (r.state === 'recording') {
+        checkpointAudio(r);
         r.pause();
         await liveCapture.current?.pause();
         setPaused(true);
@@ -791,11 +890,14 @@ export function App() {
     () =>
       [
         meeting?.notes || '',
-        ...segments.map((segment) =>
-          segment.translation
-            ? `${segment.speakerLabel}: ${segment.text}\n譯文: ${segment.translation}`
-            : `${segment.speakerLabel}: ${segment.text}`,
-        ),
+        ...segments
+          .filter((segment) => segment.isFinal)
+          .map((segment) => {
+            const original = `${segment.speakerLabel}: ${segment.text}`;
+            return segment.translation && segment.translationIsFinal !== false
+              ? `${original}\n譯文: ${segment.translation}`
+              : original;
+          }),
       ]
         .filter(Boolean)
         .join('\n\n'),
@@ -1103,7 +1205,7 @@ export function App() {
                     {recording
                       ? paused
                         ? '錄音已暫停，可隨時繼續或結束保存。'
-                        : '音訊每 5 秒分段保存於本機瀏覽器。'
+                        : '音訊約每秒分段保存。需要重整時，請先儲存錄音。'
                       : '選擇會議模式、音訊來源與語言後即可開始錄音。'}
                   </p>
                 </div>
@@ -1111,15 +1213,26 @@ export function App() {
                 <div className="capture-actions">
                   <LiveWaveBars active={recording && !paused} subscribeLevels={subscribeLevels} />
                   {recording && (
-                    <button
-                      type="button"
-                      className="pause"
-                      disabled={busy}
-                      onClick={() => void togglePause()}
-                    >
-                      <IconPause size={14} />
-                      <span>{paused ? '繼續' : '暫停'}</span>
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        className="pause"
+                        disabled={busy}
+                        onClick={() => void togglePause()}
+                      >
+                        <IconPause size={14} />
+                        <span>{paused ? '繼續' : '暫停'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary save-reload"
+                        disabled={busy}
+                        onClick={() => void saveRecordingAndReload()}
+                      >
+                        <IconRefresh size={14} />
+                        <span>儲存錄音並重整</span>
+                      </button>
+                    </>
                   )}
                   <button
                     type="button"

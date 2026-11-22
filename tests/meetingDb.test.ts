@@ -7,6 +7,7 @@ import {
   listSegments,
   migrateMeetings,
   saveAudioChunk,
+  saveInterimSegment,
   saveMeeting,
   saveRecording,
   saveSegment,
@@ -65,6 +66,42 @@ describe('meeting database', () => {
     expect(await listSegments(meetingId)).toEqual([]);
     await saveSegments(meetingId, [first, second]);
     expect(await listSegments(meetingId)).toEqual([first, second]);
+  });
+
+  it('recovers the latest draft until a final replaces it, and never overwrites that final', async () => {
+    const meetingId = 'recover-drafts';
+    await saveMeeting({
+      id: meetingId,
+      title: 'Recovery',
+      createdAt: 1,
+      notes: '',
+      mode: '一般會議',
+    });
+    const recordingId = 'recover-recording';
+    await saveRecording({
+      id: recordingId,
+      meetingId,
+      createdAt: 2,
+      completed: false,
+      mimeType: 'audio/webm',
+    });
+    const draft = {
+      id: 'recover-draft',
+      meetingId,
+      recordingId,
+      track: 'mic' as const,
+      speakerLabel: '我方',
+      startedAtMs: 1250,
+      text: 'partial',
+      isFinal: false,
+    };
+    await saveInterimSegment(draft);
+    await saveInterimSegment({ ...draft, text: 'latest partial' });
+    expect(await listSegments(meetingId)).toEqual([{ ...draft, text: 'latest partial' }]);
+    const final = { ...draft, text: 'finished sentence', isFinal: true };
+    await saveSegment(final);
+    await saveInterimSegment({ ...draft, text: 'stale partial' });
+    expect(await listSegments(meetingId)).toEqual([final]);
   });
 
   it('orders segments by recording and then by offset', async () => {

@@ -731,7 +731,12 @@ main {
 .capture-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
+}
+
+.capture-actions .save-reload {
+  white-space: nowrap;
 }
 
 .wave-bars {

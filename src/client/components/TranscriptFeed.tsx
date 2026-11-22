@@ -508,6 +508,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
                     <span className="segment-time">{formatTimestamp(segment.startedAtMs)}</span>
                   )}
                   {segment.timeIsChunkStart && <span className="chunk-note">片段起點</span>}
+                  {!segment.isFinal && <span className="chunk-note">恢復的未定稿</span>}
                 </div>
                 <textarea
                   className="segment-editor"
@@ -516,7 +517,14 @@ export const TranscriptFeed = memo(function TranscriptFeed({
                   value={segment.text}
                   onChange={(event) => edit(segment, event.target.value)}
                 />
-                {segment.translation && <p className="translation">{segment.translation}</p>}
+                {segment.translation && (
+                  <p className="translation">
+                    {segment.translationIsFinal === false && (
+                      <span className="chunk-note">未完成譯文：</span>
+                    )}
+                    {segment.translation}
+                  </p>
+                )}
               </article>
             ))}
 

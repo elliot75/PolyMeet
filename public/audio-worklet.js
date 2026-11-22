@@ -31,9 +31,12 @@ class PcmProcessor extends AudioWorkletProcessor {
       pcm[i] = value < 0 ? value * 32768 : value * 32767;
     }
     const rms = Math.sqrt(energy / samples.length);
-    this.port.postMessage({ type: 'audio', buffer: pcm.buffer, level: rms }, [pcm.buffer]);
+    const speechStart = rms > 0.012 && !this.speech;
+    this.port.postMessage({ type: 'audio', buffer: pcm.buffer, level: rms, speechStart }, [
+      pcm.buffer,
+    ]);
     if (rms > 0.012) {
-      if (!this.speech) this.port.postMessage({ type: 'speech.start' });
+      if (speechStart) this.port.postMessage({ type: 'speech.start' });
       this.speech = true;
       this.silentPackets = 0;
     } else if (this.speech) this.silentPackets++;

@@ -69,14 +69,18 @@ export function buildTranscriptExport(
   const heading = title?.trim() || 'PolyMeet 逐字稿';
   const lines = segments.map((segment) => {
     const stamp = formatTimestamp(segment.startedAtMs);
+    const speaker = segment.isFinal ? segment.speakerLabel : `${segment.speakerLabel}（未定稿）`;
+    const draftTranslation = segment.translationIsFinal === false;
     if (format === 'md') {
-      const header = `### [${stamp}] ${segment.speakerLabel}`;
+      const header = `### [${stamp}] ${speaker}`;
       return segment.translation
-        ? `${header}\n\n${segment.text}\n\n> ${segment.translation}`
+        ? `${header}\n\n${segment.text}\n\n> ${draftTranslation ? '未完成譯文：' : ''}${segment.translation}`
         : `${header}\n\n${segment.text}`;
     }
-    const header = `[${stamp}] ${segment.speakerLabel}: ${segment.text}`;
-    return segment.translation ? `${header}\n    譯文: ${segment.translation}` : header;
+    const header = `[${stamp}] ${speaker}: ${segment.text}`;
+    return segment.translation
+      ? `${header}\n    ${draftTranslation ? '未完成譯文' : '譯文'}: ${segment.translation}`
+      : header;
   });
   const content =
     format === 'md'

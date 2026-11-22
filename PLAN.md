@@ -6,7 +6,7 @@
 
 1. **一般會議模式**：即時收音轉逐字稿（或事後上傳既有錄音檔），會後自由選擇「**僅潤飾**成特定語言會議記錄」或「**翻譯並潤飾**成特定語言會議記錄」。
 2. **雙語會議模式**：即時收音並在畫面同步呈現逐字稿與另一方語言的即時譯文，支援**全螢幕投螢幕大字幕模式**與面對面翻轉視圖；會議結束後可一鍵輸出指定語言（或雙語對照）的正式會議記錄。
-3. **全包收音與防遺失**：支援「僅麥克風」、「麥克風 + 瀏覽器分頁/系統音訊雙軌分離（區分我方/對方）」、「既有音檔上傳補轉」，並將錄音檔與逐字稿即時分段存入瀏覽器 **IndexedDB**，斷線或重整頁面皆可完整救回。
+3. **全包收音與防遺失**：支援「僅麥克風」、「麥克風 + 瀏覽器分頁/系統音訊雙軌分離（區分我方/對方）」、「既有音檔上傳補轉」，並將錄音片段、逐字稿與未定稿存入瀏覽器 **IndexedDB**。網路中斷不影響本機備份；重整後可取回已寫入的內容，未交付的尾段不在復原保證內。
 4. **雙 Provider 混搭**：可自由指定 STT、即時翻譯、會議記錄各自使用 OpenAI 或 Google 模型，具備動態拉取可用模型與自訂 Model ID 功能。
 
 ---
@@ -19,7 +19,7 @@ flowchart LR
         UI["Workspace UI & Projection Mode"]
         Mic["Mic AudioWorklet (VAD + PCM16)"]
         Sys["Tab/System AudioWorklet (VAD + PCM16)"]
-        Rec["MediaRecorder (WebM/Opus 5s Chunks)"]
+        Rec["MediaRecorder (Browser Format, ~1s Chunks)"]
         IDB[("IndexedDB (Meetings / Segments / AudioBlobs)")]
         FileUp["Audio Upload & Auto-Chunker"]
     end
@@ -61,11 +61,11 @@ flowchart LR
 ### 3.2 雙 Provider 2026 即時 STT 地雷排除
 - **Google `gemini-3.5-transcribe-live` 不送 `serverContent.turnComplete`**：該模型只會推送 `serverContent.interimInputTranscription`（暫定文字）與 `serverContent.inputTranscription`（定稿文字）。Proxy 絕對不等待 `turnComplete`，收到 `inputTranscription` 即視為定稿並轉發前端。
 - **OpenAI `gpt-live-transcribe` 不支援 `server_vad`**：若傳入 `turn_detection: { type: "server_vad" }` 會拋出 `invalid_request_error`。因此使用該模型時強制設為 `turn_detection: null`，由前端 `AudioWorklet` 的輕量能量 VAD 在語音停頓（~700ms）或超過單句上限（18s）時送出 `audio.commit`，Proxy 再轉為 `input_audio_buffer.commit`；若使用者選用 `gpt-4o-transcribe`，則自動改開 `server_vad`。
-- **長會議連線逾時處理**：Gemini Live 存在單次連線時限（約 10–15 分鐘，會推送 `goAway`），OpenAI 約 30–60 分鐘。前端 `LiveSttClient` 具備自動無縫重連機制，並維護 500ms PCM pre-roll ring buffer，確保換線不漏字。
+- **長會議連線逾時處理**：Gemini Live 存在單次連線時限（約 10–15 分鐘，會推送 `goAway`），OpenAI 約 30–60 分鐘。前端 `LiveSttClient` 在就緒逾時、上游到期或斷線時自動重連，並重播尚未定稿的有界 PCM 佇列。重連可帶入最多 500 ms 前置靜音，不會為了補前置音訊而重送已定稿的語音；超出佇列容量時可用本機錄音補轉。
 
 ### 3.3 音訊採集與檔案補轉
 - **Chrome 分頁音訊擷取**：呼叫 `getDisplayMedia({ video: true, audio: { suppressLocalAudioPlayback: false } })` 時，設 `videoTrack.enabled = false` 而不直接呼叫 `videoTrack.stop()`（避免部分 Chromium 版本連帶中斷音訊），並監聽 `audioTrack.onended` 同步停止錄音。
-- **雙軌音訊管理**：麥克風與系統音訊各走獨立 `AudioWorkletNode` 識別「我方」與「對方」，同時透過 `ChannelMergerNode` 混音給 `MediaRecorder` 每 5 秒輸出 WebM/Opus 切片存入 IndexedDB。
+- **雙軌音訊管理**：麥克風與系統音訊各走獨立 `AudioWorkletNode` 識別「我方」與「對方」，同時透過 `ChannelMergerNode` 將兩路送到 `MediaRecorder` 的獨立聲道，約每秒將瀏覽器支援格式的錄音切片存入 IndexedDB。
 - **突破 OpenAI 25MB 上傳上限**：前端利用 Web Audio API `decodeAudioData` 自動將大音檔切為每段 10 分鐘的 16kHz mono WAV（約 19MB）分段上傳並重組時間軸；Google 則走 `@google/genai` Files API 進行音檔轉錄，處理完成後自動刪除雲端暫存檔。
 
 ---
@@ -272,4 +272,4 @@ export interface MinutesRecord {
 2. **一般會議測試**：開啟麥克風收音 30 秒，確認即時逐字稿穩定輸出，測試「僅潤飾」及「翻譯並潤飾」產出會議記錄，並確認 `.md` 匯出格式正確。
 3. **雙語會議測試**：切換為雙語模式（例如：中英），說話時確認即時雙向翻譯與上下大字幕顯示，測試 180° 翻轉與全螢幕功能。
 4. **線上雙軌與上傳補轉**：啟動「麥克風 + 分頁音訊」，播放外部聲音驗證我方與對方雙軌標籤；拖曳既有音檔至上傳視窗，驗證大檔切片與離線逐字稿生成功能。
-5. **重整持久化測試**：在錄音進行中或結束後強制重新整理頁面，驗證歷史會議、逐字稿與錄音檔完好如初。
+5. **重整持久化測試**：錄音時使用「儲存錄音並重整」，確認尾段音訊已保存並可播放；再直接重整一次，驗證已寫入的音訊、未定稿逐字稿與譯文可復原，且中斷的錄音有標示。瀏覽器不保證在強制退出前交付最後一個片段。
