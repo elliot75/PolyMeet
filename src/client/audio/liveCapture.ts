@@ -69,15 +69,17 @@ export class LiveCapture {
     );
   }
   async pause() {
+    const context = this.context;
+    if (!context || context.state === 'suspended' || context.state === 'closed') return;
     await this.flush();
-    await this.context?.suspend();
+    await context.suspend();
+    for (const client of this.clients) client.endInput();
   }
   async resume() {
     await this.context?.resume();
   }
   async stop() {
-    await this.flush();
-    await this.context?.suspend();
+    await this.pause();
     const drained = await Promise.all(this.clients.map((client) => client.drain()));
     if (drained.some((ok) => !ok))
       this.onEvent?.({

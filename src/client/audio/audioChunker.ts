@@ -27,16 +27,17 @@ export function encodeWav(samples: Float32Array, rate = RATE): Blob {
 }
 export async function* splitAudio(
   file: File,
+  completedParts = 0,
 ): AsyncGenerator<{ file: File; offsetMs: number; index: number; total: number }> {
   if (file.size <= 23 * 1024 * 1024) {
-    yield { file, offsetMs: 0, index: 1, total: 1 };
+    if (!completedParts) yield { file, offsetMs: 0, index: 1, total: 1 };
     return;
   }
   const context = new AudioContext();
   try {
     const audio = await context.decodeAudioData(await file.arrayBuffer());
     const total = Math.ceil(audio.duration / SECONDS);
-    for (let index = 0; index < total; index++) {
+    for (let index = completedParts; index < total; index++) {
       const offset = index * SECONDS,
         duration = Math.min(SECONDS, audio.duration - offset);
       const offline = new OfflineAudioContext(1, Math.ceil(duration * RATE), RATE);

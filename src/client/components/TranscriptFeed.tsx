@@ -1,6 +1,11 @@
 import { memo, useEffect, useRef, useState, type DragEvent, type HTMLAttributes } from 'react';
 import { splitAudio } from '../audio/audioChunker';
-import { saveSegment, saveUploadedRecording, updateSegmentText } from '../db/meetingDb';
+import {
+  saveSegments,
+  saveUploadedRecording,
+  updateSegmentText,
+  type Recording,
+} from '../db/meetingDb';
 import { downloadTranscript, formatTimestamp } from '../services/exporter';
 import { headers, type Settings } from '../services/settings';
 import type { AudioTrackRole, TranscriptSegment } from '../../shared/types';
@@ -78,13 +83,17 @@ export const TranscriptFeed = memo(function TranscriptFeed({
   const dialog = useRef<HTMLDialogElement>(null);
   const input = useRef<HTMLInputElement>(null);
   const abort = useRef<AbortController | null>(null);
+  const uploadProgress = useRef<{ recording: Recording; saved: boolean; completed: number } | null>(
+    null,
+  );
   const writes = useRef<Promise<void>>(Promise.resolve());
   const pressedOutside = useRef(false);
 
   useEffect(() => () => abort.current?.abort(), []);
 
   function choose(next: File | undefined) {
-    if (!next || busy) return;
+    if (!next || abort.current) return;
+    uploadProgress.current = null;
     try {
       setFile(normalizeAudio(next));
       setUploadError('');
@@ -104,29 +113,34 @@ export const TranscriptFeed = memo(function TranscriptFeed({
   }
 
   async function upload() {
-    if (!file || busy) return;
+    if (!file || abort.current) return;
     const controller = new AbortController();
     abort.current = controller;
     setBusy(true);
     onBusyChange(true);
     setUploadError('');
     setProgress('正在保存及準備音檔…');
-    setCompleted(undefined);
-    setTotal(undefined);
-    const recording = {
-      id: crypto.randomUUID(),
-      meetingId,
-      createdAt: Date.now(),
-      mimeType: file.type,
-      filename: file.name,
-      completed: false,
-    };
+    const upload = (uploadProgress.current ??= {
+      recording: {
+        id: crypto.randomUUID(),
+        meetingId,
+        createdAt: Date.now(),
+        mimeType: file.type,
+        filename: file.name,
+        completed: true,
+      },
+      saved: false,
+      completed: 0,
+    });
     try {
-      await saveUploadedRecording({ ...recording, completed: true }, file);
-      onRecordingSaved();
-      if (controller.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
-      for await (const part of splitAudio(file)) {
-        if (controller.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
+      if (!upload.saved) {
+        await saveUploadedRecording(upload.recording, file);
+        upload.saved = true;
+        onRecordingSaved();
+      }
+      controller.signal.throwIfAborted();
+      for await (const part of splitAudio(file, upload.completed)) {
+        controller.signal.throwIfAborted();
         setTotal(part.total);
         setCompleted(part.index - 1);
         setProgress(`正在轉錄第 ${part.index} / ${part.total} 段…`);
@@ -156,7 +170,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
           );
         }
         const result = await response.json();
-        if (controller.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
+        controller.signal.throwIfAborted();
         const items: { text: string; startSeconds: number; endSeconds?: number }[] = Array.isArray(
           result.segments,
         )
@@ -164,28 +178,27 @@ export const TranscriptFeed = memo(function TranscriptFeed({
           : result.text?.trim()
             ? [{ text: result.text.trim(), startSeconds: 0 }]
             : [];
-        for (const item of items) {
-          if (controller.signal.aborted) throw new DOMException('Cancelled', 'AbortError');
-          const segment: TranscriptSegment = {
-            id: crypto.randomUUID(),
-            meetingId,
-            recordingId: recording.id,
-            track: 'upload',
-            speakerLabel: '音檔',
-            startedAtMs: part.offsetMs + item.startSeconds * 1000,
-            timeIsChunkStart: !Array.isArray(result.segments),
-            endedAtMs:
-              item.endSeconds === undefined ? undefined : part.offsetMs + item.endSeconds * 1000,
-            text: item.text,
-            isFinal: true,
-          };
-          await saveSegment(segment);
-          onAppend(segment);
-        }
+        const segments: TranscriptSegment[] = items.map((item) => ({
+          id: crypto.randomUUID(),
+          meetingId,
+          recordingId: upload.recording.id,
+          track: 'upload',
+          speakerLabel: '音檔',
+          startedAtMs: part.offsetMs + item.startSeconds * 1000,
+          timeIsChunkStart: !Array.isArray(result.segments),
+          endedAtMs:
+            item.endSeconds === undefined ? undefined : part.offsetMs + item.endSeconds * 1000,
+          text: item.text,
+          isFinal: true,
+        }));
+        await saveSegments(meetingId, segments);
+        upload.completed = part.index;
+        segments.forEach(onAppend);
         if (result.cleanupWarning)
           setUploadError('轉錄完成，但無法刪除 Google 暫存檔，請至供應商管理介面檢查。');
         setCompleted(part.index);
       }
+      uploadProgress.current = null;
       setProgress('轉錄完成，音檔與逐字稿已保存。');
       setFile(null);
     } catch (e) {
@@ -349,6 +362,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
                   className="icon-button"
                   aria-label="移除已選音檔"
                   onClick={() => {
+                    uploadProgress.current = null;
                     setFile(null);
                     if (input.current) input.current.value = '';
                   }}

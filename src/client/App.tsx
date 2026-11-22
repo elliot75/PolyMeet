@@ -367,7 +367,7 @@ export function App() {
   useEffect(() => {
     if (drawerOpen) {
       wasDrawerOpenRef.current = true;
-      drawerCloseRef.current?.focus();
+      drawerCloseRef.current?.focus({ preventScroll: true });
     } else if (wasDrawerOpenRef.current) {
       wasDrawerOpenRef.current = false;
       mobileMenuButtonRef.current?.focus();
@@ -376,8 +376,17 @@ export function App() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setDrawerOpen(false);
     };
+    const narrowViewport = window.matchMedia('(max-width: 860px)');
+    const onResize = () => {
+      if (!narrowViewport.matches) setDrawerOpen(false);
+    };
     window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    narrowViewport.addEventListener('change', onResize);
+    onResize();
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      narrowViewport.removeEventListener('change', onResize);
+    };
   }, [drawerOpen]);
 
   useEffect(() => {
@@ -851,7 +860,13 @@ export function App() {
       {drawerOpen && (
         <div className="sidebar-backdrop" aria-hidden="true" onClick={() => setDrawerOpen(false)} />
       )}
-      <aside className={`sidebar ${drawerOpen ? 'open' : ''}`} aria-label="會議側邊欄">
+      <aside
+        id="meeting-sidebar"
+        className={`sidebar ${drawerOpen ? 'open' : ''}`}
+        role={drawerOpen ? 'dialog' : undefined}
+        aria-modal={drawerOpen || undefined}
+        aria-label="會議側邊欄"
+      >
         <div className="brand-row">
           <div className="brand">
             <span className="brandmark" aria-hidden="true">
@@ -952,7 +967,7 @@ export function App() {
         </div>
       </aside>
 
-      <main>
+      <main inert={drawerOpen}>
         <header className="topbar">
           <div className="topbar-left">
             <button
@@ -961,6 +976,7 @@ export function App() {
               className="icon-button mobile-menu-button"
               aria-label="開啟會議列表"
               aria-expanded={drawerOpen}
+              aria-controls="meeting-sidebar"
               onClick={() => setDrawerOpen((value) => !value)}
             >
               <IconMenu size={18} />
@@ -1345,7 +1361,10 @@ export function App() {
               <br />
               都有跡可循。
             </h1>
-            <p>整合即時逐字稿、雙語口譯字幕與 AI 會議紀要，資料全程保存在你的瀏覽器中。</p>
+            <p>
+              會議資料保存在此瀏覽器。使用轉錄、翻譯與 AI
+              紀錄時，相關音訊或文字會傳送至你選擇的服務。
+            </p>
             <div className="empty-capabilities">
               <span>雙軌即時轉錄</span>
               <span>雙語同步投影字幕</span>

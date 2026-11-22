@@ -4,6 +4,9 @@ import type { SttStart, SttServerEvent } from '../../shared/protocol';
 import { createEventMapper, geminiConfiguration, openAiConfiguration } from './adapters';
 import { isAllowedOrigin } from '../origin';
 
+// 600 ms of PCM16 at 24 kHz exceeds OpenAI's default 500 ms VAD silence threshold.
+const vadTailSilence = Buffer.alloc(24_000 * 2 * 0.6).toString('base64');
+
 type UpstreamFactory = (start: SttStart, key: string) => WebSocket;
 function connectProvider(start: SttStart, key: string): WebSocket {
   const url =
@@ -92,7 +95,12 @@ export function attachSttProxy(server: Server, connect: UpstreamFactory = connec
         manualCommit =
           start.provider === 'openai' &&
           ['gpt-live-transcribe', 'gpt-transcribe', 'gpt-realtime-whisper'].includes(start.model);
-        upstream = connect(start, key);
+        try {
+          upstream = connect(start, key);
+        } catch {
+          fail('provider_error', '無法建立即時轉錄連線，請檢查 API 金鑰與設定。');
+          return;
+        }
         const map = createEventMapper(start);
         upstream.on('open', () =>
           upstream?.send(
@@ -197,6 +205,9 @@ export function attachSttProxy(server: Server, connect: UpstreamFactory = connec
                 },
           ),
         );
+      } else if (data?.type === 'audio.end' && provider === 'openai' && !manualCommit) {
+        // Server VAD needs PCM silence to close an active turn after capture stops.
+        upstream.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: vadTailSilence }));
       } else if (data?.type === 'audio.commit') {
         if (manualCommit) upstream.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
         else if (provider === 'gemini')

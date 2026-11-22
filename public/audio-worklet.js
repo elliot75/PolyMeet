@@ -46,17 +46,23 @@ class PcmProcessor extends AudioWorkletProcessor {
     }
   }
   process(inputs) {
-    const input = inputs[0]?.[0];
-    if (!input) return true;
-    for (let i = 0; i < input.length; i++) this.samples.push(input[i]);
-    while (this.position + 1 < this.samples.length) {
+    const channels = inputs[0];
+    if (!channels?.length) return true;
+    for (let i = 0; i < channels[0].length; i++) {
+      let sample = 0;
+      for (const channel of channels) sample += channel[i];
+      this.samples.push(sample / channels.length);
+    }
+    while (Math.ceil(this.position) < this.samples.length) {
       const i = Math.floor(this.position),
         fraction = this.position - i;
-      this.packet.push(this.samples[i] * (1 - fraction) + this.samples[i + 1] * fraction);
+      this.packet.push(
+        this.samples[i] * (1 - fraction) + this.samples[Math.ceil(this.position)] * fraction,
+      );
       this.position += this.ratio;
       if (this.packet.length >= this.targetRate / 10) this.emit();
     }
-    const consumed = Math.floor(this.position);
+    const consumed = Math.min(this.samples.length, Math.floor(this.position));
     if (consumed) {
       this.samples.splice(0, consumed);
       this.position -= consumed;

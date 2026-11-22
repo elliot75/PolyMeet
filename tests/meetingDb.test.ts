@@ -10,6 +10,7 @@ import {
   saveMeeting,
   saveRecording,
   saveSegment,
+  saveSegments,
 } from '../src/client/db/meetingDb';
 
 describe('meeting database', () => {
@@ -40,6 +41,32 @@ describe('meeting database', () => {
     expect(await listRecordings(meeting.id)).toEqual([recording]);
     expect(await (await getRecordingBlob(recording)).text()).toBe('firstsecond');
   });
+  it('rolls back every segment when saving an uploaded part fails', async () => {
+    const meetingId = 'upload-part-meeting';
+    await saveMeeting({
+      id: meetingId,
+      title: 'Upload',
+      createdAt: 1,
+      notes: '',
+      mode: '一般會議',
+    });
+    const first = {
+      id: 'upload-part-first',
+      meetingId,
+      track: 'upload' as const,
+      speakerLabel: '音檔',
+      startedAtMs: 0,
+      text: 'first',
+      isFinal: true,
+    };
+    const second = { ...first, id: 'upload-part-second', startedAtMs: 1000, text: 'second' };
+    const uncloneable = { ...second, toJSON: () => second };
+    await expect(saveSegments(meetingId, [first, uncloneable])).rejects.toThrow();
+    expect(await listSegments(meetingId)).toEqual([]);
+    await saveSegments(meetingId, [first, second]);
+    expect(await listSegments(meetingId)).toEqual([first, second]);
+  });
+
   it('orders segments by recording and then by offset', async () => {
     const meetingId = 'ordering-meeting';
     await saveMeeting({

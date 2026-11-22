@@ -138,13 +138,31 @@ export async function listMinutes(meetingId: string): Promise<MinutesRecord[]> {
   );
 }
 export async function saveSegment(segment: TranscriptSegment): Promise<void> {
+  await saveSegments(segment.meetingId, [segment]);
+}
+export async function saveSegments(
+  meetingId: string,
+  segments: TranscriptSegment[],
+): Promise<void> {
+  if (!segments.length) return;
   const tx = (await db()).transaction(['meetings', 'segments'], 'readwrite');
-  if (!(await tx.objectStore('meetings').get(segment.meetingId))) {
+  if (!(await tx.objectStore('meetings').get(meetingId))) {
     await tx.done;
     throw new Error('meeting not found');
   }
-  await tx.objectStore('segments').put(segment);
-  await tx.done;
+  const store = tx.objectStore('segments');
+  try {
+    // Queue all writes in the same transaction so a partially saved part can be retried.
+    await Promise.all([tx.done, ...segments.map(async (segment) => store.put(segment))]);
+  } catch (error) {
+    try {
+      tx.abort();
+    } catch {
+      // IndexedDB may have already aborted the transaction.
+    }
+    await tx.done.catch(() => {});
+    throw error;
+  }
 }
 export async function listSegments(meetingId: string): Promise<TranscriptSegment[]> {
   const database = await db();

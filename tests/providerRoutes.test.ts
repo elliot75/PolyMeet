@@ -86,6 +86,7 @@ describe('provider routes with simulated services', () => {
       (async function* () {
         yield { type: 'response.output_text.delta', delta: 'hello' };
         yield { type: 'response.output_text.delta', delta: ' world' };
+        yield { type: 'response.completed' };
       })(),
     );
     const response = await app.request('/api/minutes/stream', {
@@ -105,7 +106,37 @@ describe('provider routes with simulated services', () => {
     expect(text).toContain('event: delta');
     expect(text).toContain('hello');
     expect(text).toContain('event: done');
+    expect(mocked.openaiResponse).toHaveBeenCalledWith(
+      expect.objectContaining({ store: false }),
+      expect.anything(),
+    );
   });
+  it.each(['response.incomplete', 'response.failed', undefined])(
+    'reports OpenAI generation without successful completion (%s)',
+    async (terminalEvent) => {
+      mocked.openaiResponse.mockResolvedValue(
+        (async function* () {
+          yield { type: 'response.output_text.delta', delta: 'partial' };
+          if (terminalEvent) yield { type: terminalEvent };
+        })(),
+      );
+      const response = await app.request('/api/minutes/stream', {
+        method: 'POST',
+        headers: { 'x-openai-api-key': 'test-key', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'openai',
+          model: 'test',
+          text: 'meeting',
+          targetLanguage: 'English',
+          action: 'polish',
+          style: 'standard',
+        }),
+      });
+      const body = await response.text();
+      expect(body).toContain('event: error');
+      expect(body).not.toContain('event: done');
+    },
+  );
   it('uses the requested Chinese script for file transcripts', async () => {
     const data = form();
     data.set('provider', 'openai');
@@ -122,6 +153,7 @@ describe('provider routes with simulated services', () => {
     mocked.openaiResponse.mockResolvedValue(
       (async function* () {
         yield { type: 'response.output_text.delta', delta: '会议' };
+        yield { type: 'response.completed' };
         yield { type: 'response.output_text.delta', delta: '记录' };
       })(),
     );
@@ -161,6 +193,7 @@ describe('provider routes with simulated services', () => {
     mocked.openaiResponse.mockResolvedValue(
       (async function* () {
         yield { type: 'response.output_text.delta', delta: 'ok' };
+        yield { type: 'response.completed' };
       })(),
     );
     const translateRes = await app.request('/api/translate/stream', {

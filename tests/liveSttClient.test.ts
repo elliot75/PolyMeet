@@ -62,6 +62,7 @@ describe('live transcription reconnect', () => {
     first.close();
     client.audio(new Uint8Array([3, 4]).buffer);
     client.commit();
+    client.endInput();
     await vi.advanceTimersByTimeAsync(1000);
     const second = FakeSocket.instances[1];
     second.open();
@@ -70,6 +71,7 @@ describe('live transcription reconnect', () => {
       { type: 'audio.chunk', pcm16Base64: 'AQI=' },
       { type: 'audio.chunk', pcm16Base64: 'AwQ=' },
       { type: 'audio.commit' },
+      { type: 'audio.end' },
     ]);
     expect(events).toContain('session.reconnecting');
     client.stop();
