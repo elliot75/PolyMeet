@@ -26,5 +26,15 @@ describe('proxy origin rules', () => {
     expect(isAllowedOrigin('meet.example.ts.net', 'http://meet.example.ts.net')).toBe(false);
     expect(isAllowedOrigin('192.168.1.10:8444', undefined)).toBe(false);
     expect(isAllowedOrigin('localhost:3001', tailnet)).toBe(false);
+
+    // When reverse proxy strips port from Host header but browser sends port in Origin
+    vi.stubEnv(
+      'POLYMEET_HTTPS_ORIGINS',
+      'https://polymeet.example.com:8082, https://polymeet.example.com',
+    );
+    expect(isAllowedOrigin('polymeet.example.com', 'https://polymeet.example.com:8082')).toBe(true);
+    expect(isAllowedOrigin('polymeet.example.com', 'https://polymeet.example.com')).toBe(true);
+    expect(isAllowedOrigin('polymeet.example.com', undefined)).toBe(true);
+    expect(isAllowedOrigin('polymeet.example.com', 'https://other.example.com:8082')).toBe(false);
   });
 });

@@ -27,13 +27,25 @@ export function isAllowedOrigin(host: string | undefined, origin: string | undef
     );
   }
   const remote = parseHost(host, 'https');
-  return (
-    !!remote &&
-    (origin === undefined || origin === remote.origin) &&
-    (process.env.POLYMEET_HTTPS_ORIGINS ?? '')
-      .split(',')
-      .some((entry) => entry.trim() === remote.origin)
-  );
+  if (!remote) return false;
+  const allowed = (process.env.POLYMEET_HTTPS_ORIGINS ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  if (!allowed.includes(remote.origin)) return false;
+  if (origin === undefined || origin === remote.origin) return true;
+
+  try {
+    const originUrl = new URL(origin);
+    return (
+      originUrl.protocol === 'https:' &&
+      originUrl.hostname.toLowerCase() === remote.hostname.toLowerCase() &&
+      allowed.includes(originUrl.origin)
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function isLocalRequest(host: string | undefined, forwardedHost: string | undefined) {

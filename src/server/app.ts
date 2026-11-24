@@ -28,8 +28,14 @@ function isAuthError(error: unknown): boolean {
 
 export const app = new Hono();
 app.use('*', async (c, next) => {
-  if (!isAllowedOrigin(requestHost(c), c.req.header('origin')))
+  const host = requestHost(c);
+  const origin = c.req.header('origin');
+  if (!isAllowedOrigin(host, origin)) {
+    console.warn(
+      `[origin_blocked] host="${host}" origin="${origin}" path="${c.req.path}" forwarded-host="${c.req.header('x-forwarded-host')}"`,
+    );
     return c.json({ error: 'origin_not_allowed' }, 403);
+  }
   await next();
   c.header('X-Content-Type-Options', 'nosniff');
   c.header('Referrer-Policy', 'no-referrer');
