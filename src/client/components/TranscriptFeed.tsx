@@ -1,3 +1,5 @@
+import { formatSpeakerLabel } from '../i18n/format';
+import { useI18n, message, type LocalizedMessage } from '../i18n/preferences';
 import {
   memo,
   useCallback,
@@ -8,7 +10,7 @@ import {
   type DragEvent,
   type HTMLAttributes,
 } from 'react';
-import type { AudioTrackRole, TranscriptSegment } from '../../shared/types';
+import type { AudioTrackRole, TranscriptSegment, UsageSessionKind } from '../../shared/types';
 import { normalizeAudioMime } from '../audio/audioMime';
 import {
   deleteInterimSegment,
@@ -67,6 +69,16 @@ interface Props {
   onRecordingSaved: () => void;
   onBusyChange: (busy: boolean) => void;
   onSeek: (recordingId: string, seconds: number) => void;
+  onUsageSessionCompleted?: (info: {
+    usageSessionId: string;
+    meetingId: string;
+    meetingTitle: string;
+    kind: UsageSessionKind;
+    startedAt: number;
+    endedAt: number;
+    durationSeconds: number;
+  }) => void | Promise<void>;
+  onUsageActivity?: (meetingId: string) => void | Promise<void>;
   editSaves: EditSaveQueue<{ id: string; meetingId: string; text: string }>;
   settings: Settings;
   locked?: boolean;
@@ -101,16 +113,19 @@ export const TranscriptFeed = memo(function TranscriptFeed({
   onRecordingSaved,
   onBusyChange,
   onSeek,
+  onUsageSessionCompleted,
+  onUsageActivity,
   editSaves,
   settings,
   locked = false,
 }: Props) {
+  const { t, localize } = useI18n();
   const [busy, setBusy] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [existingSegments, setExistingSegments] = useState<TranscriptSegment[] | null>(null);
   const [recordingMode, setRecordingMode] = useState<'' | 'append' | 'replace'>('');
   const [recordingDone, setRecordingDone] = useState(false);
-  const [progress, setProgress] = useState('');
+  const [progress, setProgress] = useState<LocalizedMessage>('');
   const [completed, setCompleted] = useState<number | undefined>();
   const [total, setTotal] = useState<number | undefined>();
   const [uploadError, setUploadError] = useState('');
@@ -122,7 +137,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
   const [renameAll, setRenameAll] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameError, setRenameError] = useState('');
-  const [renameStatus, setRenameStatus] = useState('');
+  const [renameStatus, setRenameStatus] = useState<LocalizedMessage>('');
   const renameId = useId();
   const renameDialog = useRef<HTMLDialogElement>(null);
   const renameButton = useRef<HTMLButtonElement>(null);
@@ -203,7 +218,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
     try {
       const ids = await renameSegmentSpeaker(renameTarget, name, renameAll ? 'speaker' : 'segment');
       onSpeakerChange(meetingId, ids, name);
-      setRenameStatus(`已更新 ${ids.length} 段逐字稿的語者名稱。`);
+      setRenameStatus(message('已更新 {1} 段逐字稿的語者名稱。', ids.length));
       await closeDialogAnimated(renameDialog.current);
     } catch {
       setRenameError('無法儲存語者名稱。若逐字稿已在其他分頁修改，請重新載入後再試。');
@@ -249,16 +264,24 @@ export const TranscriptFeed = memo(function TranscriptFeed({
     setCompleted(undefined);
     setTotal(undefined);
     setProgress(savedRecording ? '正在讀取錄音…' : '正在保存及準備音檔…');
+    const usageSessionId = crypto.randomUUID();
+    const startedAt = Date.now();
+    let partsStarted = 0;
+    let partsCompleted = 0;
     const options = {
       settings,
       languageHints,
       signal,
+      meetingTitle: meetingTitle || '未命名會議',
+      usageSessionId,
       onPartStart(index: number, total: number) {
+        partsStarted += 1;
         setTotal(total);
         setCompleted(index - 1);
-        setProgress(`正在轉錄第 ${index} / ${total} 段…`);
+        setProgress(message('正在轉錄第 {1} / {2} 段…', index, total));
       },
       onPartComplete(index: number, cleanupWarning: boolean) {
+        partsCompleted += 1;
         if (cleanupWarning) setUploadError('無法刪除 Google 暫存檔，請至供應商管理介面檢查。');
         setCompleted(index);
       },
@@ -273,6 +296,16 @@ export const TranscriptFeed = memo(function TranscriptFeed({
         if (added.length) onAppend(savedRecording, added, previous);
         setRecordingDone(true);
         setProgress(added.length ? '轉錄完成，逐字稿已保存。' : '未辨識出語音，現有逐字稿已保留。');
+        const endedAt = Date.now();
+        await onUsageSessionCompleted?.({
+          usageSessionId,
+          meetingId,
+          meetingTitle: meetingTitle || '未命名會議',
+          kind: 'file_transcription',
+          startedAt,
+          endedAt,
+          durationSeconds: Math.max(0, (endedAt - startedAt) / 1000),
+        });
       } else if (file) {
         const upload = (uploadProgress.current ??= {
           recording: {
@@ -304,11 +337,35 @@ export const TranscriptFeed = memo(function TranscriptFeed({
         uploadProgress.current = null;
         setProgress('轉錄完成，音檔與辨識出的逐字稿已保存。');
         setFile(null);
+        const endedAt = Date.now();
+        await onUsageSessionCompleted?.({
+          usageSessionId,
+          meetingId,
+          meetingTitle: meetingTitle || '未命名會議',
+          kind: 'file_transcription',
+          startedAt,
+          endedAt,
+          durationSeconds: Math.max(0, (endedAt - startedAt) / 1000),
+        });
       }
     } catch (e) {
       if (!signal.aborted) setUploadError(e instanceof Error ? e.message : '無法處理此音檔。');
       const retained = savedRecording ? '現有錄音與逐字稿已保留。' : '已保存的音檔與片段會保留。';
-      setProgress(signal.aborted ? `已停止轉錄，${retained}` : retained);
+      setProgress(signal.aborted ? message('已停止轉錄，{1}', message(retained)) : retained);
+      if (partsCompleted > 0) {
+        const endedAt = Date.now();
+        await onUsageSessionCompleted?.({
+          usageSessionId,
+          meetingId,
+          meetingTitle: meetingTitle || '未命名會議',
+          kind: 'file_transcription',
+          startedAt,
+          endedAt,
+          durationSeconds: Math.max(0, (endedAt - startedAt) / 1000),
+        });
+      } else if (partsStarted > 0) {
+        void onUsageActivity?.(meetingId);
+      }
     } finally {
       abort.current = null;
       setBusy(false);
@@ -380,7 +437,10 @@ export const TranscriptFeed = memo(function TranscriptFeed({
           (segment.translation
             ? normalizeMeetingQuery(segment.translation).includes(normalizedFilter)
             : false) ||
-          normalizeMeetingQuery(segment.speakerLabel).includes(normalizedFilter),
+          normalizeMeetingQuery(segment.speakerLabel).includes(normalizedFilter) ||
+          normalizeMeetingQuery(formatSpeakerLabel(t, segment.speakerLabel)).includes(
+            normalizedFilter,
+          ),
       )
     : segments;
   const activeInterims = Object.entries(interims).filter(([, item]) => item.text.trim());
@@ -391,11 +451,10 @@ export const TranscriptFeed = memo(function TranscriptFeed({
     <section className="transcript-section">
       <div className="section-head">
         <div className="section-title-group">
-          <div className="eyebrow">TRANSCRIPT FEED</div>
           <div className="section-title-row">
-            <h2>逐字稿</h2>
-            <span className="pill-count">{segments.length} 段</span>
-            {isBilingual && <span className="pill-tag">雙語同步</span>}
+            <h2>{t('逐字稿')}</h2>
+            <span className="pill-count">{t('{1} 段', segments.length)}</span>
+            {isBilingual && <span className="pill-tag">{t('雙語同步')}</span>}
           </div>
         </div>
         <div className="section-actions">
@@ -406,7 +465,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
               disabled={busy || locked || untranslated.length === 0}
               onClick={() => translate(untranslated)}
             >
-              補齊未譯段落
+              {t('補齊未譯段落')}
             </button>
           )}
           {segments.length > 0 &&
@@ -415,7 +474,11 @@ export const TranscriptFeed = memo(function TranscriptFeed({
                 key={format}
                 type="button"
                 className="secondary small-button"
-                aria-label={`匯出 ${format.toUpperCase()} ${format === 'srt' || format === 'vtt' ? '字幕' : '逐字稿'}`}
+                aria-label={t(
+                  '匯出 {1} {2}',
+                  format.toUpperCase(),
+                  format === 'srt' || format === 'vtt' ? t('字幕') : t('逐字稿'),
+                )}
                 onClick={() => downloadTranscript(format, segments, meetingTitle, recordings)}
               >
                 <IconDownload size={14} />
@@ -432,7 +495,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
             }}
           >
             <IconUpload size={14} />
-            <span>上傳音檔</span>
+            <span>{t('上傳音檔')}</span>
           </button>
         </div>
       </div>
@@ -477,13 +540,15 @@ export const TranscriptFeed = memo(function TranscriptFeed({
       >
         <div className="dialog-header">
           <div>
-            <div className="eyebrow">AUDIO TRANSCRIPTION</div>
-            <h2 id="upload-title">{recordingToTranscribe ? '轉錄已存錄音' : '上傳音檔轉錄'}</h2>
+            <div className="eyebrow">{t('音檔轉錄')}</div>
+            <h2 id="upload-title">
+              {recordingToTranscribe ? t('轉錄已存錄音') : t('上傳音檔轉錄')}
+            </h2>
           </div>
           <button
             type="button"
             className="close"
-            aria-label="關閉轉錄視窗"
+            aria-label={t('關閉轉錄視窗')}
             disabled={busy}
             onClick={() => void closeDialogAnimated(dialog.current)}
           >
@@ -492,20 +557,22 @@ export const TranscriptFeed = memo(function TranscriptFeed({
         </div>
         <p className="hint">
           {recordingToTranscribe
-            ? '此錄音的音訊會傳送至選定的轉錄服務，逐字稿會儲存到原錄音。'
-            : '音檔會先保存於此瀏覽器，再傳送至選定的轉錄服務。超過 23 MiB 的音檔將自動切分處理。'}
+            ? t('此錄音的音訊會傳送至選定的轉錄服務，逐字稿會儲存到原錄音。')
+            : t(
+                '音檔會先保存於此瀏覽器，再傳送至選定的轉錄服務。超過 23 MiB 的音檔將自動切分處理。',
+              )}
         </p>
         {recordingToTranscribe ? (
           <>
             <p className="recording-filename">{recordingFilename(recordingToTranscribe)}</p>
             {existingSegments === null && !uploadError && (
               <p className="hint" role="status">
-                正在檢查現有逐字稿…
+                {t('正在檢查現有逐字稿…')}
               </p>
             )}
             {needsRecordingMode && !recordingDone && (
               <fieldset className="recording-transcript-options" disabled={busy}>
-                <legend>已有 {existingSegments?.length} 段逐字稿</legend>
+                <legend>{t('已有 {1} 段逐字稿', existingSegments?.length)}</legend>
                 <label>
                   <input
                     type="radio"
@@ -513,7 +580,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
                     checked={recordingMode === 'append'}
                     onChange={() => setRecordingMode('append')}
                   />
-                  保留現有逐字稿並附加新段落（可能出現重複內容）
+                  {t('保留現有逐字稿並附加新段落（可能出現重複內容）')}
                 </label>
                 <label>
                   <input
@@ -522,7 +589,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
                     checked={recordingMode === 'replace'}
                     onChange={() => setRecordingMode('replace')}
                   />
-                  轉錄成功後覆蓋此錄音的逐字稿與譯文
+                  {t('轉錄成功後覆蓋此錄音的逐字稿與譯文')}
                 </label>
               </fieldset>
             )}
@@ -544,13 +611,13 @@ export const TranscriptFeed = memo(function TranscriptFeed({
               <div className="selected-file-card">
                 <div>
                   <strong>{file.name}</strong>
-                  <small>{(file.size / 1024 / 1024).toFixed(1)} MB · 已準備轉錄</small>
+                  <small>{t('{1} MB · 已準備轉錄', (file.size / 1024 / 1024).toFixed(1))}</small>
                 </div>
                 {!busy && (
                   <button
                     type="button"
                     className="icon-button"
-                    aria-label="移除已選音檔"
+                    aria-label={t('移除已選音檔')}
                     onClick={() => {
                       uploadProgress.current = null;
                       setFile(null);
@@ -563,8 +630,8 @@ export const TranscriptFeed = memo(function TranscriptFeed({
               </div>
             ) : (
               <>
-                <strong>將音檔拖放至此處</strong>
-                <small>支援 WAV、MP3、M4A、WebM、OGG、FLAC、AAC</small>
+                <strong>{t('將音檔拖放至此處')}</strong>
+                <small>{t('支援 WAV、MP3、M4A、WebM、OGG、FLAC、AAC')}</small>
               </>
             )}
             <button
@@ -573,7 +640,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
               disabled={busy}
               onClick={() => input.current?.click()}
             >
-              {file ? '更換音檔' : '選擇音檔'}
+              {file ? t('更換音檔') : t('選擇音檔')}
             </button>
             <input
               ref={input}
@@ -586,7 +653,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
         )}
         {busy && (
           <div className="progress-block">
-            <progress aria-label="音檔轉錄進度" max={total} value={completed} />
+            <progress aria-label={t('音檔轉錄進度')} max={total} value={completed} />
             {progressPercent !== null && (
               <span className="progress-percent">{progressPercent}%</span>
             )}
@@ -594,13 +661,13 @@ export const TranscriptFeed = memo(function TranscriptFeed({
         )}
         {progress && (
           <p className="hint status-feedback" role="status">
-            {progress}
+            {localize(progress)}
           </p>
         )}
         {uploadError && (
           <p className="error" role="alert">
             <IconAlertCircle size={15} />
-            <span>{uploadError}</span>
+            <span>{localize(uploadError)}</span>
           </p>
         )}
         <div className="dialog-actions">
@@ -614,7 +681,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
                 setProgress('正在停止…');
               }}
             >
-              停止轉錄
+              {t('停止轉錄')}
             </button>
           ) : (
             <>
@@ -624,7 +691,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
                 className="secondary"
                 onClick={() => void closeDialogAnimated(dialog.current)}
               >
-                關閉
+                {t('關閉')}
               </button>
               {!recordingDone || !recordingToTranscribe ? (
                 <button
@@ -633,7 +700,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
                   disabled={locked || (recordingToTranscribe ? !canTranscribeRecording : !file)}
                   onClick={() => void transcribe()}
                 >
-                  開始轉錄
+                  {t('開始轉錄')}
                 </button>
               ) : null}
             </>
@@ -674,11 +741,11 @@ export const TranscriptFeed = memo(function TranscriptFeed({
         }}
       >
         <div className="dialog-header">
-          <h2 id={`${renameId}-title`}>更名語者</h2>
+          <h2 id={`${renameId}-title`}>{t('更名語者')}</h2>
           <button
             type="button"
             className="close"
-            aria-label="關閉更名視窗"
+            aria-label={t('關閉更名視窗')}
             disabled={renaming}
             onClick={() => void closeDialogAnimated(renameDialog.current)}
           >
@@ -692,7 +759,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
             void saveSpeakerName();
           }}
         >
-          <label htmlFor={`${renameId}-name`}>語者名稱</label>
+          <label htmlFor={`${renameId}-name`}>{t('語者名稱')}</label>
           <input
             id={`${renameId}-name`}
             ref={speakerNameInput}
@@ -711,15 +778,15 @@ export const TranscriptFeed = memo(function TranscriptFeed({
             />
             <span>
               {renameTarget?.speakerGroup
-                ? '一併更名同一批轉錄中語者標籤相同的段落'
+                ? t('一併更名同一批轉錄中語者標籤相同的段落')
                 : renameTarget?.recordingId
-                  ? '一併更名此錄音中具有相同語者標籤的段落'
-                  : '一併更名此會議中未連結錄音、且語者標籤相同的段落'}
+                  ? t('一併更名此錄音中具有相同語者標籤的段落')
+                  : t('一併更名此會議中未連結錄音、且語者標籤相同的段落')}
             </span>
           </label>
           {renameError && (
             <p className="error" role="alert">
-              {renameError}
+              {localize(renameError)}
             </p>
           )}
           <div className="dialog-actions">
@@ -729,7 +796,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
               disabled={renaming}
               onClick={() => void closeDialogAnimated(renameDialog.current)}
             >
-              取消
+              {t('取消')}
             </button>
             <button
               type="submit"
@@ -742,7 +809,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
                 speakerName.trim() === renameTarget?.speakerLabel
               }
             >
-              {renaming ? '正在儲存…' : '儲存名稱'}
+              {renaming ? t('正在儲存…') : t('儲存名稱')}
             </button>
           </div>
         </form>
@@ -751,16 +818,16 @@ export const TranscriptFeed = memo(function TranscriptFeed({
       <div className="card transcript-card">
         {translating.size > 0 && (
           <p className="hint transcript-inline-error" role="status">
-            正在翻譯 {translating.size} 段逐字稿…
+            {t('正在翻譯 {1} 段逐字稿…', translating.size)}
           </p>
         )}
         <div role="status">
-          {renameStatus && <p className="hint transcript-inline-error">{renameStatus}</p>}
+          {renameStatus && <p className="hint transcript-inline-error">{localize(renameStatus)}</p>}
         </div>
         {editError && (
           <p className="error transcript-inline-error" role="alert">
             <IconAlertCircle size={15} />
-            <span>{editError}</span>
+            <span>{localize(editError)}</span>
           </p>
         )}
 
@@ -772,14 +839,14 @@ export const TranscriptFeed = memo(function TranscriptFeed({
                 ref={filterInput}
                 value={filterQuery}
                 onChange={(event) => setFilterQuery(event.target.value)}
-                placeholder="搜尋逐字稿或譯文…"
-                aria-label="搜尋逐字稿"
+                placeholder={t('搜尋逐字稿或譯文…')}
+                aria-label={t('搜尋逐字稿')}
               />
               {filterQuery && (
                 <button
                   type="button"
                   className="search-clear"
-                  aria-label="清除搜尋"
+                  aria-label={t('清除搜尋')}
                   onClick={() => setFilterQuery('')}
                 >
                   <IconX size={13} />
@@ -803,12 +870,16 @@ export const TranscriptFeed = memo(function TranscriptFeed({
                           : 'upload'
                     }`}
                   >
-                    {segment.speakerLabel}
+                    {formatSpeakerLabel(t, segment.speakerLabel)}
                   </span>
                   <button
                     type="button"
                     className="speaker-rename"
-                    aria-label={`更名 ${segment.speakerLabel}（${formatTimestamp(segment.startedAtMs)}）`}
+                    aria-label={t(
+                      '更名 {1}（{2}）',
+                      formatSpeakerLabel(t, segment.speakerLabel),
+                      formatTimestamp(segment.startedAtMs),
+                    )}
                     aria-haspopup="dialog"
                     disabled={busy || locked}
                     onClick={(event) => {
@@ -820,13 +891,13 @@ export const TranscriptFeed = memo(function TranscriptFeed({
                       setRenameTarget(segment);
                     }}
                   >
-                    更名
+                    {t('更名')}
                   </button>
                   {segment.recordingId && playableRecordingIds?.has(segment.recordingId) ? (
                     <button
                       type="button"
                       className="seek"
-                      aria-label={`從 ${formatTimestamp(segment.startedAtMs)} 播放錄音`}
+                      aria-label={t('從 {1} 播放錄音', formatTimestamp(segment.startedAtMs))}
                       onClick={() => onSeek(segment.recordingId!, segment.startedAtMs / 1000)}
                     >
                       <IconPlay size={11} />
@@ -835,17 +906,17 @@ export const TranscriptFeed = memo(function TranscriptFeed({
                   ) : (
                     <span className="segment-time">{formatTimestamp(segment.startedAtMs)}</span>
                   )}
-                  {segment.timeIsChunkStart && <span className="chunk-note">片段起點</span>}
+                  {segment.timeIsChunkStart && <span className="chunk-note">{t('片段起點')}</span>}
                   {!segment.isFinal && (
                     <>
-                      <span className="chunk-note">恢復的未定稿</span>
+                      <span className="chunk-note">{t('恢復的未定稿')}</span>
                       <button
                         type="button"
                         className="secondary small-button"
                         disabled={busy || locked || !!draftAction || !segment.text.trim()}
                         onClick={() => void handleFinalize(segment)}
                       >
-                        確認定稿
+                        {t('確認定稿')}
                       </button>
                       <button
                         type="button"
@@ -853,7 +924,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
                         disabled={busy || locked || !!draftAction}
                         onClick={() => void handleDelete(segment.id)}
                       >
-                        刪除
+                        {t('刪除')}
                       </button>
                     </>
                   )}
@@ -866,13 +937,13 @@ export const TranscriptFeed = memo(function TranscriptFeed({
                       }
                       onClick={() => translate([segment])}
                     >
-                      重新翻譯
+                      {t('重新翻譯')}
                     </button>
                   )}
                 </div>
                 <textarea
                   className="segment-editor"
-                  aria-label={`${segment.speakerLabel}逐字稿`}
+                  aria-label={t('{1}逐字稿', formatSpeakerLabel(t, segment.speakerLabel))}
                   disabled={busy || locked || draftAction === segment.id}
                   value={segment.text}
                   onChange={(event) => edit(segment, event.target.value)}
@@ -880,7 +951,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
                 {segment.translation && (
                   <p className="translation">
                     {segment.translationIsFinal === false && (
-                      <span className="chunk-note">未完成譯文：</span>
+                      <span className="chunk-note">{t('未完成譯文：')}</span>
                     )}
                     {segment.translation}
                   </p>
@@ -892,11 +963,11 @@ export const TranscriptFeed = memo(function TranscriptFeed({
               <article key={id} className="segment interim-segment" aria-live="polite">
                 <div className="segment-meta">
                   <span className={`segment-badge ${item.track === 'mic' ? 'mic' : 'system'}`}>
-                    {item.track === 'mic' ? '我方' : '對方'}
+                    {item.track === 'mic' ? t('我方') : t('對方')}
                   </span>
                   <span className="interim-pill">
                     <span className="pulse-dot" aria-hidden="true" />
-                    辨識中
+                    {t('辨識中')}
                   </span>
                 </div>
                 <p className="interim-text">{item.text}</p>
@@ -905,9 +976,9 @@ export const TranscriptFeed = memo(function TranscriptFeed({
           </div>
         ) : normalizedFilter ? (
           <div className="panel-empty">
-            <p>找不到符合「{filterQuery}」的逐字稿內容。</p>
+            <p>{t('找不到符合「{1}」的逐字稿內容。', filterQuery)}</p>
             <button type="button" className="secondary" onClick={() => setFilterQuery('')}>
-              顯示全部段落
+              {t('顯示全部段落')}
             </button>
           </div>
         ) : (
@@ -915,8 +986,8 @@ export const TranscriptFeed = memo(function TranscriptFeed({
             <div className="panel-empty-icon" aria-hidden="true">
               <IconMessageSquare size={22} />
             </div>
-            <h3>尚無逐字稿內容</h3>
-            <p>點擊上方「開始錄音」進行即時轉錄，或匯入既有音訊檔自動生成逐字稿。</p>
+            <h3>{t('尚無逐字稿內容')}</h3>
+            <p>{t('點擊上方「開始錄音」進行即時轉錄，或匯入既有音訊檔自動生成逐字稿。')}</p>
             <button
               type="button"
               className="secondary"
@@ -927,7 +998,7 @@ export const TranscriptFeed = memo(function TranscriptFeed({
               }}
             >
               <IconUpload size={15} />
-              <span>上傳音檔轉錄</span>
+              <span>{t('上傳音檔轉錄')}</span>
             </button>
           </div>
         )}

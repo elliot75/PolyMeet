@@ -1,3 +1,5 @@
+import { workspaceFetch } from './workspaceSession';
+import type { UsageMetric } from '../../shared/types';
 import { headers, model, type Settings } from './settings';
 export async function streamText(
   settings: Settings,
@@ -5,8 +7,9 @@ export async function streamText(
   params: Record<string, string>,
   onText: (text: string) => void,
   signal: AbortSignal,
+  onUsage?: (usage: UsageMetric) => void,
 ) {
-  const response = await fetch(`/api/${operation}/stream`, {
+  const response = await workspaceFetch(`/api/${operation}/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...headers(settings) },
     body: JSON.stringify({ provider: settings.provider, model: model(settings), ...params }),
@@ -14,6 +17,9 @@ export async function streamText(
   });
   if (!response.ok || !response.body) {
     const result = await response.json().catch(() => ({}));
+    if (result.error === 'unauthenticated') {
+      throw new Error('登入階段已過期，請重新登入。');
+    }
     if (result.error === 'missing_api_key') {
       throw new Error('請先設定 API 金鑰，或在伺服器設定金鑰。');
     }
@@ -49,7 +55,17 @@ export async function streamText(
           .map((line) => line.slice(5).trimStart())
           .join('\n');
         if (event === 'error') throw new Error('AI 服務無法完成請求，請檢查金鑰及模型設定。');
-        if (event === 'done') doneEvent = true;
+        if (event === 'done') {
+          doneEvent = true;
+          if (data) {
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed?.usage) onUsage?.(parsed.usage as UsageMetric);
+            } catch {
+              // Ignore malformed usage payload on completion.
+            }
+          }
+        }
         if (event === 'delta') {
           const parsed = JSON.parse(data);
           if (typeof parsed?.text === 'string') onText(parsed.text);

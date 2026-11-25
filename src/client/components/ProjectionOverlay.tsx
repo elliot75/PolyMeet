@@ -1,3 +1,4 @@
+import { useI18n } from '../i18n/preferences';
 import { useEffect, useRef, useState } from 'react';
 import type { TranscriptSegment } from '../../shared/types';
 import { closeDialogAnimated, openDialogModal } from '../utils/dialog';
@@ -12,6 +13,7 @@ export function ProjectionOverlay({
   segments: TranscriptSegment[];
   interim: string;
 }) {
+  const { t, localize } = useI18n();
   const dialog = useRef<HTMLDialogElement>(null);
   const textArea = useRef<HTMLDivElement>(null);
   const surface = useRef<HTMLDivElement>(null);
@@ -91,8 +93,8 @@ export function ProjectionOverlay({
   }, [opened]);
 
   const contextText = interim ? latest?.text : previous?.text;
-  const activeOriginal = interim || latest?.text || '等待語音…';
-  const activeTranslation = latest?.translation || (latest ? '翻譯中…' : '翻譯將顯示在這裡');
+  const activeOriginal = interim || latest?.text || t('等待語音…');
+  const activeTranslation = latest?.translation || (latest ? t('翻譯中…') : t('翻譯將顯示在這裡'));
 
   return (
     <>
@@ -106,12 +108,12 @@ export function ProjectionOverlay({
         }}
       >
         <IconPresentation size={15} />
-        <span>投影字幕</span>
+        <span>{t('投影字幕')}</span>
       </button>
       <dialog
         ref={dialog}
         className="projection"
-        aria-label="投影字幕"
+        aria-label={t('投影字幕')}
         onCancel={(event) => {
           event.preventDefault();
           if (!document.fullscreenElement) void closeDialogAnimated(dialog.current);
@@ -126,12 +128,12 @@ export function ProjectionOverlay({
       >
         <div ref={surface} className="projection-surface">
           <div className={`projection-controls ${visible ? '' : 'hidden-controls'}`}>
-            <div className="projection-layouts" role="group" aria-label="字幕版型">
+            <div className="projection-layouts" role="group" aria-label={t('字幕版型')}>
               {(
                 [
-                  ['stack', '上下字幕'],
-                  ['columns', '左右對照'],
-                  ['face', '面對面翻轉'],
+                  ['stack', t('上下字幕')],
+                  ['columns', t('左右對照')],
+                  ['face', t('面對面翻轉')],
                 ] as const
               ).map(([id, label]) => (
                 <button
@@ -149,7 +151,7 @@ export function ProjectionOverlay({
               <button
                 type="button"
                 onClick={() => setSize((n) => Math.max(24, n - 4))}
-                aria-label="縮小字體"
+                aria-label={t('縮小字體')}
               >
                 A−
               </button>
@@ -157,13 +159,13 @@ export function ProjectionOverlay({
               <button
                 type="button"
                 onClick={() => setSize((n) => Math.min(120, n + 4))}
-                aria-label="放大字體"
+                aria-label={t('放大字體')}
               >
                 A＋
               </button>
             </div>
             <button type="button" onClick={() => void fullscreen()}>
-              {isFullscreen ? '離開全螢幕' : '全螢幕'}
+              {isFullscreen ? t('離開全螢幕') : t('全螢幕')}
             </button>
             <button
               type="button"
@@ -171,12 +173,12 @@ export function ProjectionOverlay({
               onClick={() => void closeDialogAnimated(dialog.current)}
             >
               <IconX size={15} />
-              <span>退出</span>
+              <span>{t('退出')}</span>
             </button>
-            <span className="projection-shortcuts">F 全螢幕 · + / - 字級 · Esc 退出</span>
+            <span className="projection-shortcuts">{t('F 全螢幕 · + / - 字級 · Esc 退出')}</span>
             {fullscreenError && (
               <span className="projection-alert" role="status">
-                {fullscreenError}
+                {localize(fullscreenError)}
               </span>
             )}
           </div>
@@ -191,13 +193,13 @@ export function ProjectionOverlay({
               <div className="projection-context">{contextText}</div>
             )}
             <div className={`projection-original ${interim ? 'is-interim' : ''}`}>
-              {interim && <span className="projection-pill">辨識中</span>}
+              {interim && <span className="projection-pill">{t('辨識中')}</span>}
               <span>{activeOriginal}</span>
             </div>
             {layout === 'face' && <div className="projection-divider" aria-hidden="true" />}
             <div className={`projection-translation ${interim ? 'is-stale' : ''}`}>
               {interim && latest?.translation && (
-                <span className="projection-pill muted">上一句譯文</span>
+                <span className="projection-pill muted">{t('上一句譯文')}</span>
               )}
               <span>{activeTranslation}</span>
             </div>

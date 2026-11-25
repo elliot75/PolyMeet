@@ -309,3 +309,61 @@ export function IconCheckCircle({ size = 16, ...props }: IconProps) {
     </svg>
   );
 }
+
+export function IconBarChart({ size = 16, ...props }: IconProps) {
+  return (
+    <svg {...base(size)} {...props}>
+      <path d="M4 20h16" />
+      <rect x="6" y="12" width="3" height="5" rx="0.5" />
+      <rect x="10.5" y="7" width="3" height="10" rx="0.5" />
+      <rect x="15" y="4" width="3" height="13" rx="0.5" />
+    </svg>
+  );
+}
+
+export function IconShield({ size = 16, ...props }: IconProps) {
+  return (
+    <svg {...base(size)} {...props}>
+      <path d="M12 3 5 6v6c0 4.5 3 7.8 7 9 4-1.2 7-4.5 7-9V6l-7-3Z" />
+      <path d="m9.5 12 1.8 1.8 3.7-3.8" />
+    </svg>
+  );
+}
+
+export function IconLogOut({ size = 15, ...props }: IconProps) {
+  return (
+    <svg {...base(size)} {...props}>
+      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+      <path d="m16 17 5-5-5-5" />
+      <path d="M21 12H9" />
+    </svg>
+  );
+}
+
+export function IconKey({ size = 15, ...props }: IconProps) {
+  return (
+    <svg {...base(size)} {...props}>
+      <circle cx="8" cy="14" r="4" />
+      <path d="m11 11 8.5-8.5" />
+      <path d="m16 6 2 2" />
+      <path d="m19 3 2 2" />
+    </svg>
+  );
+}
+
+export function IconClock({ size = 15, ...props }: IconProps) {
+  return (
+    <svg {...base(size)} {...props}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" />
+    </svg>
+  );
+}
+
+export function IconChevronDown({ size = 15, ...props }: IconProps) {
+  return (
+    <svg {...base(size)} {...props}>
+      <path d="m6 9 6 6 6-6" />
+    </svg>
+  );
+}

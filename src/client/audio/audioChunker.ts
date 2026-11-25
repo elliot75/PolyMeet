@@ -32,7 +32,13 @@ export async function* splitAudio(
   completedParts = 0,
   signal?: AbortSignal,
   forceSplit = false,
-): AsyncGenerator<{ file: File; offsetMs: number; index: number; total: number }> {
+): AsyncGenerator<{
+  file: File;
+  offsetMs: number;
+  index: number;
+  total: number;
+  durationSeconds?: number;
+}> {
   signal?.throwIfAborted();
   const fitsUpload = file.size <= 23 * 1024 * 1024;
   if (fitsUpload && (!forceSplit || typeof AudioContext === 'undefined')) {
@@ -50,7 +56,8 @@ export async function* splitAudio(
     });
     signal?.throwIfAborted();
     if (fitsUpload && (!audio || audio.duration <= OPENAI_MAX_AUDIO_SECONDS)) {
-      if (!completedParts) yield { file, offsetMs: 0, index: 1, total: 1 };
+      if (!completedParts)
+        yield { file, offsetMs: 0, index: 1, total: 1, durationSeconds: audio?.duration };
       return;
     }
     if (!audio) return;
@@ -81,6 +88,7 @@ export async function* splitAudio(
         offsetMs: offset * 1000,
         index: index + 1,
         total,
+        durationSeconds: duration,
       };
     }
   } finally {

@@ -1,3 +1,4 @@
+import type { UsageTimeInterval } from '../../shared/types';
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react';
 import { LiveCapture } from '../audio/liveCapture';
 import { startLocalAudioMeter, type AudioLevels } from '../audio/localAudioMeter';
@@ -47,6 +48,17 @@ export interface UseRecordingSessionOptions {
   onRecordingsUpdated: (meetingId: string, recordings: Recording[]) => void;
   onFinishTranslationsForReload: () => Promise<void>;
   onFlushAll: () => Promise<boolean>;
+  onActiveUsageSessionChange?: (usageSessionId: string | null) => void;
+  onRecordingComplete?: (info: {
+    usageSessionId: string;
+    meetingId: string;
+    meetingTitle: string;
+    startedAt: number;
+    endedAt: number;
+    durationSeconds: number;
+    activeIntervals: UsageTimeInterval[];
+    isReload: boolean;
+  }) => void | Promise<void>;
 }
 
 export function useRecordingSession(options: UseRecordingSessionOptions) {
@@ -223,6 +235,12 @@ export function useRecordingSession(options: UseRecordingSessionOptions) {
       let startedAt = Date.now(),
         pausedAt = 0,
         pausedDuration = 0;
+      const activeIntervals: UsageTimeInterval[] = [];
+      let activeSince: number | null = null;
+      const finishActiveInterval = (end: number) => {
+        if (activeSince !== null && end > activeSince) activeIntervals.push([activeSince, end]);
+        activeSince = null;
+      };
       recordingClockRef.current = { startedAtMs: startedAt, pausedAccumMs: 0, pausedAtMs: 0 };
       const timeline = new SegmentTimeline();
       const transcriptWrites = new Set<Promise<void>>();
@@ -284,14 +302,17 @@ export function useRecordingSession(options: UseRecordingSessionOptions) {
 
       r.onstart = () => {
         startedAt = Date.now();
+        activeSince = startedAt;
         recordingClockRef.current = { startedAtMs: startedAt, pausedAccumMs: 0, pausedAtMs: 0 };
       };
       r.onpause = () => {
         pausedAt = Date.now();
+        finishActiveInterval(pausedAt);
         recordingClockRef.current.pausedAtMs = pausedAt;
       };
       r.onresume = () => {
         const now = Date.now();
+        activeSince = Math.max(activeIntervals.at(-1)?.[1] ?? startedAt, now);
         if (pausedAt) pausedDuration += now - pausedAt;
         pausedAt = 0;
         if (recordingClockRef.current.pausedAtMs) {
@@ -300,6 +321,8 @@ export function useRecordingSession(options: UseRecordingSessionOptions) {
         }
       };
       await saveRecording(saved);
+      const usageSessionId = crypto.randomUUID();
+      optionsRef.current.onActiveUsageSessionChange?.(usageSessionId);
       if (liveEnabled) {
         live = new LiveCapture();
         liveCapture.current = live;
@@ -316,6 +339,10 @@ export function useRecordingSession(options: UseRecordingSessionOptions) {
               provider,
               model: provider === 'openai' ? settings.openaiLiveModel : settings.geminiLiveModel,
               apiKey: key || undefined,
+              meetingId: meeting.id,
+              meetingTitle: meeting.title,
+              recordingId: saved.id,
+              usageSessionId,
               languageHints: [
                 languageCode(meeting.sourceLang || '繁體中文'),
                 ...(meeting.mode === '雙語會議'
@@ -430,7 +457,11 @@ export function useRecordingSession(options: UseRecordingSessionOptions) {
           });
       };
       r.onstop = () => {
-        const stoppedAt = pausedAt || Date.now();
+        const stoppedAt = Math.max(startedAt, activeIntervals.at(-1)?.[1] ?? 0, Date.now());
+        finishActiveInterval(stoppedAt);
+        const elapsedSeconds =
+          activeIntervals.reduce((ms, [start, end]) => ms + end - start, 0) / 1000;
+        const isReload = reloadRequested.current;
         stopLocalMeter.current?.();
         stopLocalMeter.current = undefined;
         setRecording(false);
@@ -453,18 +484,16 @@ export function useRecordingSession(options: UseRecordingSessionOptions) {
             mixContext.current = null;
           }
           await Promise.all([writes, ...transcriptWrites]);
-          if (reloadRequested.current) {
+          if (isReload) {
             await onFinishTranslationsForReload();
             await Promise.all(transcriptWrites);
           }
+          optionsRef.current.onActiveUsageSessionChange?.(null);
           if (!failed)
             await saveRecording({
               ...saved,
               completed: true,
-              durationSeconds: Math.max(
-                0,
-                Math.floor((stoppedAt - startedAt - pausedDuration) / 1000),
-              ),
+              durationSeconds: Math.floor(elapsedSeconds),
             });
           const [updatedRecordings, savedSegments] = await Promise.all([
             listRecordings(saved.meetingId),
@@ -477,6 +506,17 @@ export function useRecordingSession(options: UseRecordingSessionOptions) {
             );
             onDraftsRecovered(saved, drafts);
           }
+          const usageCompletion = optionsRef.current.onRecordingComplete?.({
+            usageSessionId,
+            meetingId: saved.meetingId,
+            meetingTitle: meeting.title,
+            startedAt,
+            endedAt: stoppedAt,
+            durationSeconds: elapsedSeconds,
+            activeIntervals,
+            isReload,
+          });
+          if (isReload) await usageCompletion;
           savedForReload = !failed && !transcriptSaveFailed;
           setLiveStatus('');
           setInterims({});
@@ -499,6 +539,7 @@ export function useRecordingSession(options: UseRecordingSessionOptions) {
       setRecording(true);
       setBusy(false);
     } catch (e) {
+      optionsRef.current.onActiveUsageSessionChange?.(null);
       flushInterimsRef.current = null;
       mic?.getTracks().forEach((t) => t.stop());
       display?.getTracks().forEach((t) => t.stop());

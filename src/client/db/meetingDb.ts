@@ -32,50 +32,77 @@ export interface AudioChunk {
   blob: Blob;
 }
 interface PolyMeetDB extends DBSchema {
+  workspaceMetadata: { key: string; value: string };
   meetings: { key: string; value: Meeting };
   recordings: { key: string; value: Recording; indexes: { 'by-meeting': string } };
   audioChunks: { key: [string, number]; value: AudioChunk; indexes: { 'by-recording': string } };
   minutes: { key: string; value: MinutesRecord; indexes: { 'by-meeting': string } };
   segments: { key: string; value: TranscriptSegment; indexes: { 'by-meeting': string } };
 }
+const legacyDbName = 'polymeet';
+let currentDbName = legacyDbName;
 let cached: Promise<IDBPDatabase<PolyMeetDB>> | undefined;
+
+export function setMeetingDbNamespace(userId: string | null) {
+  const nextName = userId ? `polymeet-u-${userId}` : legacyDbName;
+  if (nextName === currentDbName) return;
+  currentDbName = nextName;
+  if (cached) {
+    void cached.then((database) => database.close()).catch(() => {});
+    cached = undefined;
+  }
+}
+
+function openMeetingDb(name: string, onClosed?: () => void) {
+  let handle: IDBPDatabase<PolyMeetDB> | undefined;
+  return openDB<PolyMeetDB>(name, 4, {
+    upgrade(database, oldVersion) {
+      if (oldVersion < 1) {
+        database.createObjectStore('meetings', { keyPath: 'id' });
+        database
+          .createObjectStore('recordings', { keyPath: 'id' })
+          .createIndex('by-meeting', 'meetingId');
+        database
+          .createObjectStore('audioChunks', { keyPath: ['recordingId', 'sequence'] })
+          .createIndex('by-recording', 'recordingId');
+      }
+      if (oldVersion < 2)
+        database
+          .createObjectStore('minutes', { keyPath: 'id' })
+          .createIndex('by-meeting', 'meetingId');
+      if (oldVersion < 3)
+        database
+          .createObjectStore('segments', { keyPath: 'id' })
+          .createIndex('by-meeting', 'meetingId');
+      if (oldVersion < 4) database.createObjectStore('workspaceMetadata');
+    },
+    blocking() {
+      handle?.close();
+      onClosed?.();
+    },
+    terminated: onClosed,
+  }).then((database) => {
+    handle = database;
+    return database;
+  });
+}
+
 const db = () => {
   if (!cached) {
-    let handle: IDBPDatabase<PolyMeetDB> | undefined;
-    cached = openDB<PolyMeetDB>('polymeet', 3, {
-      upgrade(database, oldVersion) {
-        if (oldVersion < 1) {
-          database.createObjectStore('meetings', { keyPath: 'id' });
-          database
-            .createObjectStore('recordings', { keyPath: 'id' })
-            .createIndex('by-meeting', 'meetingId');
-          database
-            .createObjectStore('audioChunks', { keyPath: ['recordingId', 'sequence'] })
-            .createIndex('by-recording', 'recordingId');
-        }
-        if (oldVersion < 2)
-          database
-            .createObjectStore('minutes', { keyPath: 'id' })
-            .createIndex('by-meeting', 'meetingId');
-        if (oldVersion < 3)
-          database
-            .createObjectStore('segments', { keyPath: 'id' })
-            .createIndex('by-meeting', 'meetingId');
-      },
-      blocking() {
-        handle?.close();
-        cached = undefined;
-      },
-      terminated() {
-        cached = undefined;
-      },
-    })
+    const targetName = currentDbName;
+    const clearCache = () => {
+      if (currentDbName === targetName) cached = undefined;
+    };
+    cached = openMeetingDb(targetName, clearCache)
       .then((database) => {
-        handle = database;
+        if (currentDbName !== targetName) {
+          database.close();
+          throw new Error('database namespace changed');
+        }
         return database;
       })
       .catch((error) => {
-        cached = undefined;
+        clearCache();
         throw error;
       });
   }
@@ -381,6 +408,83 @@ export async function updateSegmentText(id: string, text: string): Promise<void>
 }
 
 const archiveStores = ['meetings', 'recordings', 'audioChunks', 'segments', 'minutes'] as const;
+
+export async function importLegacyWorkspace(
+  userId: string,
+  olderMeetings: Meeting[] = [],
+): Promise<Meeting[]> {
+  const targetName = `polymeet-u-${userId}`;
+  if (currentDbName !== targetName) throw new Error('登入帳號已變更，請重新開啟工作區。');
+  const target = await db();
+  const legacy = await openMeetingDb(legacyDbName);
+  try {
+    const claim = legacy.transaction(['workspaceMetadata', 'meetings'], 'readwrite');
+    const metadata = claim.objectStore('workspaceMetadata');
+    const owner = await metadata.get('legacyOwner');
+    if (owner && owner !== userId) {
+      await claim.done;
+      throw new Error('這個瀏覽器的舊版資料已綁定其他帳號。');
+    }
+    const hasLegacyData =
+      olderMeetings.length > 0 || (await claim.objectStore('meetings').count()) > 0;
+    if (currentDbName !== targetName) {
+      await claim.done;
+      throw new Error('登入帳號已變更，請重新開啟工作區。');
+    }
+    if (hasLegacyData && !owner) await metadata.add(userId, 'legacyOwner');
+    await claim.done;
+    if (!hasLegacyData) return [];
+
+    const source = legacy.transaction(archiveStores);
+    const [meetings, recordings, chunks, segments, minutes] = await Promise.all([
+      source.objectStore('meetings').getAll(),
+      source.objectStore('recordings').getAll(),
+      source.objectStore('audioChunks').getAll(),
+      source.objectStore('segments').getAll(),
+      source.objectStore('minutes').getAll(),
+      source.done,
+    ]);
+    if (currentDbName !== targetName) throw new Error('登入帳號已變更，請重新開啟工作區。');
+    const candidates = new Map(
+      [...olderMeetings, ...meetings].map((meeting) => [meeting.id, meeting]),
+    );
+    const tx = target.transaction(archiveStores, 'readwrite');
+    try {
+      const existing = await tx.objectStore('meetings').getAllKeys();
+      for (const id of existing) candidates.delete(id);
+      const importedRecordings = recordings.filter((recording) =>
+        candidates.has(recording.meetingId),
+      );
+      const recordingIds = new Set(importedRecordings.map((recording) => recording.id));
+      await Promise.all([
+        tx.done,
+        ...[...candidates.values()].map((meeting) => tx.objectStore('meetings').add(meeting)),
+        ...importedRecordings.map((recording) => tx.objectStore('recordings').add(recording)),
+        ...chunks
+          .filter((chunk) => recordingIds.has(chunk.recordingId))
+          .map((chunk) => tx.objectStore('audioChunks').add(chunk)),
+        ...segments
+          .filter((segment) => candidates.has(segment.meetingId))
+          .map((segment) => tx.objectStore('segments').add(segment)),
+        ...minutes
+          .filter((item) => candidates.has(item.meetingId))
+          .map((item) => tx.objectStore('minutes').add(item)),
+      ]);
+    } catch (error) {
+      try {
+        tx.abort();
+      } catch {
+        // IndexedDB may have already aborted the transaction.
+      }
+      await tx.done.catch(() => {});
+      throw error;
+    }
+    if (candidates.size) notifyMeetingContentChanged();
+    return [...candidates.values()].sort((a, b) => b.createdAt - a.createdAt);
+  } finally {
+    legacy.close();
+  }
+}
 
 export async function exportMeetingArchive({
   meetingId,

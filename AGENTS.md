@@ -6,7 +6,7 @@ PolyMeet is a React 19/Vite client and a Hono/Node proxy. `src/client/` contains
 
 ## Development and Build
 
-- `npm install` installs dependencies; Node.js 20.19+ or 22.12+ is required.
+- `npm install` installs dependencies; Node.js 22.13+ (22.x), 24.x, or 26+ is required.
 - `npm run dev` starts Vite on port 5173 and the local proxy on port 3001.
 - `npm run typecheck` checks client, server, and shared TypeScript.
 - `npm test` runs the Vitest suite without live provider credentials.

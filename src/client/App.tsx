@@ -1,3 +1,6 @@
+import { LanguageSelect, useI18n } from './i18n/preferences';
+import type { MessageKey } from './i18n/messages';
+import { formatMeetingTitle } from './i18n/format';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { SettingsDialog, type ServerHealth } from './components/SettingsDialog';
 import { MinutesStudio } from './components/MinutesStudio';
@@ -6,24 +9,58 @@ import { TranscriptFeed } from './components/TranscriptFeed';
 import { ProjectionOverlay } from './components/ProjectionOverlay';
 import { DeleteMeetingDialog } from './components/DeleteMeetingDialog';
 import { LocalWorkspace } from './components/LocalWorkspace';
+import { AuthScreen } from './components/AuthScreen';
+import { UsageSummaryDialog } from './components/UsageSummaryDialog';
+import { UsageDashboardDialog } from './components/UsageDashboardDialog';
+import { AdminDialog } from './components/AdminDialog';
+import { ChangePasswordDialog } from './components/ChangePasswordDialog';
 import type { AudioLevels } from './audio/localAudioMeter';
 import { useRecordingSession, type LevelSubscriber } from './hooks/useRecordingSession';
 import { needsTranslation, TranslationQueue } from './services/translationQueue';
 import { formatTimestamp } from './services/exporter';
-import type { MinutesRecord, TranscriptSegment } from '../shared/types';
+import { formatConvertedCurrency, formatUsd } from '../shared/pricing';
+import type {
+  AuthUser,
+  CurrencySettings,
+  MinutesRecord,
+  TranscriptSegment,
+  UsageSessionKind,
+  UsageSessionSummary,
+  UsageTimeInterval,
+} from '../shared/types';
+import {
+  announceSessionChange,
+  bindWorkspaceAccount,
+  workspaceAccountId,
+  WORKSPACE_SESSION_CHANGED,
+} from './services/workspaceSession';
 import { EditSaveQueue } from './services/editSaveQueue';
 import { languageCode, languages } from '../shared/languages';
-import { defaults, loadSettings, saveSettings, type Settings } from './services/settings';
+import {
+  clearSessionSettings,
+  defaults,
+  loadSettings,
+  saveSettings,
+  setSettingsNamespace,
+  type Settings,
+} from './services/settings';
+import {
+  completeUsageSession,
+  fetchMeetingUsage,
+  fetchPricing,
+  logoutUser,
+  renameMeetingUsage,
+} from './services/authClient';
 import {
   deleteMeeting,
   getPlayableRecordingIds,
   listMeetings,
   listRecordings,
   listSegments,
-  migrateMeetings,
   normalizeMeetingQuery,
   saveMeeting,
   searchMeetingContent,
+  setMeetingDbNamespace,
   subscribeToMeetingContent,
   updateSegmentTranslation,
   updateSegmentText,
@@ -34,6 +71,7 @@ import {
 } from './db/meetingDb';
 import {
   IconAlertCircle,
+  IconBarChart,
   IconBrandMark,
   IconFileText,
   IconMenu,
@@ -42,6 +80,7 @@ import {
   IconPlus,
   IconRefresh,
   IconSearch,
+  IconShield,
   IconSparkles,
   IconStop,
   IconSwap,
@@ -63,7 +102,7 @@ interface TranslationEdit {
 }
 
 const SELECTED_MEETING_KEY = 'polymeet-selected-meeting';
-const SEARCH_SOURCE_LABELS: Record<MeetingSearchSource, string> = {
+const SEARCH_SOURCE_LABELS: Record<MeetingSearchSource, MessageKey> = {
   transcript: '逐字稿',
   translation: '譯文',
   minutes: 'AI 紀錄',
@@ -113,6 +152,7 @@ const AudioMeters = memo(function AudioMeters({
   both: boolean;
   subscribeLevels: (listener: LevelSubscriber) => () => void;
 }) {
+  const { t } = useI18n();
   const [levels, setLevels] = useState<AudioLevels>({ mic: 0, system: 0 });
 
   useEffect(() => {
@@ -128,12 +168,12 @@ const AudioMeters = memo(function AudioMeters({
   return (
     <div className="levels">
       <label>
-        <span>麥克風音量</span>
+        <span>{t('麥克風音量')}</span>
         <meter min="0" max="0.2" value={levels.mic} />
       </label>
       {both && (
         <label>
-          <span>分頁音量</span>
+          <span>{t('分頁音量')}</span>
           <meter min="0" max="0.2" value={levels.system} />
         </label>
       )}
@@ -141,7 +181,19 @@ const AudioMeters = memo(function AudioMeters({
   );
 });
 
-export function App() {
+function WorkspaceApp({
+  user,
+  initialHealth,
+  onAuthLost,
+  onLogout,
+}: {
+  user: AuthUser;
+  initialHealth: ServerHealth | null;
+  onAuthLost: () => void;
+  onLogout: () => Promise<void>;
+}) {
+  const { t, locale, localize } = useI18n();
+  const selectedMeetingKey = `${SELECTED_MEETING_KEY}:${user.id}`;
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [query, setQuery] = useState('');
@@ -153,7 +205,16 @@ export function App() {
   const [studioTab, setStudioTab] = useState<'notes' | 'minutes'>('notes');
   const [minutesCount, setMinutesCount] = useState(0);
   const [settings, setSettings] = useState<Settings>(loadSettings);
-  const [serverHealth, setServerHealth] = useState<ServerHealth | null>(null);
+  const [serverHealth, setServerHealth] = useState<ServerHealth | null>(initialHealth);
+  const [currency, setCurrency] = useState<CurrencySettings>({ currencyCode: '', exchangeRate: 0 });
+  const [meetingUsage, setMeetingUsage] = useState<UsageSessionSummary | null>(null);
+  const [summaryModal, setSummaryModal] = useState<{
+    summary: UsageSessionSummary;
+    mode: 'session' | 'meeting';
+  } | null>(null);
+  const [dashboardOpen, setDashboardOpen] = useState(false);
+  const [adminOpen, setAdminOpen] = useState(false);
+  const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [source, setSource] = useState<'mic' | 'both'>('mic');
@@ -173,6 +234,17 @@ export function App() {
   const meetingsRef = useRef<Meeting[]>([]);
   meetingsRef.current = meetings;
   const translationQueueRef = useRef<TranslationQueue | null>(null);
+  const recordingTranslationJobs = useRef(new Map<string, Set<Promise<void>>>());
+  const activeRecordingUsageSessionRef = useRef<string | null>(null);
+  const translationBatchRef = useRef<{
+    id: string;
+    meetingId: string;
+    meetingTitle: string;
+    startedAt: number;
+    pending: number;
+    recordedCount: number;
+  } | null>(null);
+  const renameUsageTimerRef = useRef<number | undefined>(undefined);
   const [meetingSaves] = useState(() => new EditSaveQueue<Meeting>(saveMeeting));
   const [transcriptSaves] = useState(
     () => new EditSaveQueue<TranscriptEdit>(({ id, text }) => updateSegmentText(id, text)),
@@ -195,10 +267,76 @@ export function App() {
   const wasDrawerOpenRef = useRef(false);
 
   const meeting = meetings.find((m) => m.id === selected);
+  const meetingTitleRef = useRef('未命名會議');
+  meetingTitleRef.current = meeting?.title || '未命名會議';
   const isBilingual = meeting?.mode === '雙語會議';
   const sourceLanguage = meeting?.sourceLang || '繁體中文';
   const targetLanguage = meeting?.targetLang || 'English';
   const normalizedQuery = normalizeMeetingQuery(query);
+
+  const refreshPricingCurrency = useCallback(async () => {
+    try {
+      const data = await fetchPricing();
+      setCurrency(data.currency);
+    } catch {
+      // Optional pricing metadata refresh.
+    }
+  }, []);
+
+  const refreshMeetingUsage = useCallback(async (meetingId: string) => {
+    try {
+      const { summary } = await fetchMeetingUsage(meetingId);
+      if (selectedRef.current === meetingId) setMeetingUsage(summary);
+    } catch {
+      // Ignore transient meeting usage fetch errors.
+    }
+  }, []);
+
+  const handleUsageSessionCompleted = useCallback(
+    async (info: {
+      usageSessionId: string;
+      meetingId: string;
+      meetingTitle: string;
+      kind: UsageSessionKind;
+      startedAt: number;
+      endedAt: number;
+      durationSeconds: number;
+      activeIntervals?: UsageTimeInterval[];
+      showDialog?: boolean;
+    }) => {
+      try {
+        const { summary } = await completeUsageSession({
+          usageSessionId: info.usageSessionId,
+          meetingId: info.meetingId,
+          meetingTitle: info.meetingTitle,
+          kind: info.kind,
+          startedAt: info.startedAt,
+          endedAt: info.endedAt,
+          durationSeconds: info.durationSeconds,
+          activeIntervals: info.activeIntervals,
+        });
+        await refreshMeetingUsage(info.meetingId);
+        if (info.showDialog !== false) {
+          setSummaryModal({ summary, mode: 'session' });
+        }
+      } catch {
+        // Ignore non-fatal usage summary errors.
+      }
+    },
+    [refreshMeetingUsage],
+  );
+
+  useEffect(() => {
+    void refreshPricingCurrency();
+  }, [refreshPricingCurrency]);
+
+  useEffect(() => {
+    if (!selected) {
+      setMeetingUsage(null);
+      return;
+    }
+    void refreshMeetingUsage(selected);
+  }, [selected, refreshMeetingUsage]);
 
   const translationKey =
     settings.translationProvider === 'openai' ? settings.openaiKey : settings.geminiKey;
@@ -295,24 +433,90 @@ export function App() {
             setTranslationStatus('翻譯失敗，請檢查翻譯模型和金鑰。');
         },
       ));
+      const recordingUsageSessionId = activeRecordingUsageSessionRef.current;
+      const isBatchOutsideRecording = !recordingUsageSessionId;
+      if (isBatchOutsideRecording) {
+        if (!translationBatchRef.current || translationBatchRef.current.meetingId !== selected) {
+          translationBatchRef.current = {
+            id: crypto.randomUUID(),
+            meetingId: selected,
+            meetingTitle: meetingTitleRef.current,
+            startedAt: Date.now(),
+            pending: 0,
+            recordedCount: 0,
+          };
+        }
+      }
       const jobs = new Map<string, Promise<void>>();
       for (const segment of items) {
         if (!segment.isFinal || !segment.text.trim() || segment.meetingId !== selected) continue;
-        const job = queue.add(segment);
+        const batch = isBatchOutsideRecording ? translationBatchRef.current : null;
+        const job = queue.add(
+          segment,
+          {
+            meetingId: segment.meetingId,
+            meetingTitle: meetingTitleRef.current,
+            usageSessionId: recordingUsageSessionId ?? batch?.id,
+          },
+          () => {
+            if (batch) batch.recordedCount += 1;
+            void refreshMeetingUsage(segment.meetingId);
+          },
+        );
         if (!job) continue;
+        if (batch) batch.pending += 1;
+        if (recordingUsageSessionId) {
+          const pending =
+            recordingTranslationJobs.current.get(recordingUsageSessionId) ?? new Set();
+          pending.add(job);
+          recordingTranslationJobs.current.set(recordingUsageSessionId, pending);
+        }
         jobs.set(segment.id, job);
         void job.then(() => {
+          if (recordingUsageSessionId) {
+            const pending = recordingTranslationJobs.current.get(recordingUsageSessionId);
+            pending?.delete(job);
+            if (pending?.size === 0)
+              recordingTranslationJobs.current.delete(recordingUsageSessionId);
+          }
           setTranslating((old) => {
             if (old.get(segment.id) !== job) return old;
             const next = new Map(old);
             next.delete(segment.id);
             return next;
           });
+          if (batch && translationBatchRef.current === batch) {
+            batch.pending = Math.max(0, batch.pending - 1);
+            if (batch.pending === 0) {
+              translationBatchRef.current = null;
+              if (batch.recordedCount > 0) {
+                const endedAt = Date.now();
+                void handleUsageSessionCompleted({
+                  usageSessionId: batch.id,
+                  meetingId: batch.meetingId,
+                  meetingTitle: batch.meetingTitle,
+                  kind: 'translation',
+                  startedAt: batch.startedAt,
+                  endedAt,
+                  durationSeconds: Math.max(0, (endedAt - batch.startedAt) / 1000),
+                });
+              }
+            }
+          }
         });
       }
       if (jobs.size) setTranslating((old) => new Map([...old, ...jobs]));
     },
-    [isBilingual, selected, translationSettings, sourceLanguage, targetLanguage, translationSaves],
+    [
+      isBilingual,
+      selected,
+      translationSettings,
+      sourceLanguage,
+      targetLanguage,
+      translationSaves,
+      refreshMeetingUsage,
+      handleUsageSessionCompleted,
+    ],
   );
   const enqueueLiveTranslation = useRef(handleTranslate);
   enqueueLiveTranslation.current = handleTranslate;
@@ -320,9 +524,11 @@ export function App() {
   useEffect(() => {
     setTranslating(new Map());
     setTranslationStatus('');
+    translationBatchRef.current = null;
     return () => {
       translationQueueRef.current?.cancel();
       translationQueueRef.current = null;
+      translationBatchRef.current = null;
     };
   }, [handleTranslate]);
 
@@ -402,6 +608,23 @@ export function App() {
     onRecordingsUpdated,
     onFinishTranslationsForReload,
     onFlushAll: flushAllPendingWrites,
+    onActiveUsageSessionChange: (usageSessionId) => {
+      activeRecordingUsageSessionRef.current = usageSessionId;
+    },
+    onRecordingComplete: async (info) => {
+      const pending = recordingTranslationJobs.current.get(info.usageSessionId);
+      const completion = { ...info, kind: 'recording' as const };
+      if (pending?.size && !info.isReload) {
+        await handleUsageSessionCompleted({ ...completion, showDialog: false });
+        await Promise.allSettled(pending);
+      }
+      const meetingTitle = meetingsRef.current.find((item) => item.id === info.meetingId)?.title;
+      await handleUsageSessionCompleted({
+        ...completion,
+        meetingTitle: meetingTitle ?? info.meetingTitle,
+        showDialog: !info.isReload,
+      });
+    },
   });
 
   const workspaceLocked = recording || busy || uploading || generating;
@@ -411,6 +634,10 @@ export function App() {
       const response = await fetch('/api/health');
       if (!response.ok) throw new Error();
       const data = await response.json();
+      if (!data?.authenticated || data.user?.id !== user.id) {
+        onAuthLost();
+        return;
+      }
       setServerHealth({
         ok: true,
         openai: Boolean(data?.serverKeys?.openai),
@@ -419,7 +646,7 @@ export function App() {
     } catch {
       setServerHealth({ ok: false, openai: false, gemini: false });
     }
-  }, []);
+  }, [onAuthLost, user.id]);
 
   useEffect(() => {
     void refreshHealth();
@@ -428,24 +655,12 @@ export function App() {
   useEffect(() => {
     let active = true;
     (async () => {
-      const raw = localStorage.getItem('polymeet-meetings');
-      if (raw) {
-        let old: unknown;
-        try {
-          old = JSON.parse(raw);
-        } catch {
-          throw new Error('舊版會議資料格式無法讀取，原始資料仍保留。');
-        }
-        if (!Array.isArray(old)) throw new Error('舊版會議資料格式無法讀取，原始資料仍保留。');
-        await migrateMeetings(old as Meeting[]);
-        localStorage.removeItem('polymeet-meetings');
-      }
       const saved = await listMeetings();
       if (active) {
         setMeetings(saved);
         let previous: string | null = null;
         try {
-          previous = sessionStorage.getItem(SELECTED_MEETING_KEY);
+          previous = sessionStorage.getItem(selectedMeetingKey);
         } catch {
           // Session storage is optional; the meetings themselves are in IndexedDB.
         }
@@ -457,7 +672,7 @@ export function App() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [selectedMeetingKey]);
 
   useEffect(() => {
     let active = true;
@@ -470,7 +685,7 @@ export function App() {
     setError('');
     if (selected) {
       try {
-        sessionStorage.setItem(SELECTED_MEETING_KEY, selected);
+        sessionStorage.setItem(selectedMeetingKey, selected);
       } catch {
         // Some browser configurations disable session storage.
       }
@@ -505,7 +720,7 @@ export function App() {
     return () => {
       active = false;
     };
-  }, [selected, resetLiveStatus, transcriptSaves]);
+  }, [selected, selectedMeetingKey, resetLiveStatus, transcriptSaves]);
 
   useEffect(() => {
     if (!recordings.length) {
@@ -531,6 +746,7 @@ export function App() {
     };
     document.addEventListener('visibilitychange', flushOnHide);
     return () => {
+      window.clearTimeout(renameUsageTimerRef.current);
       document.removeEventListener('visibilitychange', flushOnHide);
       void flushAllPendingWrites();
     };
@@ -571,7 +787,7 @@ export function App() {
   function create() {
     const m: Meeting = {
       id: crypto.randomUUID(),
-      title: '未命名會議',
+      title: '',
       createdAt: Date.now(),
       notes: '',
       mode: '一般會議',
@@ -587,6 +803,16 @@ export function App() {
     const next = { ...meeting, ...patch };
     setMeetings((old) => old.map((m) => (m.id === selected ? next : m)));
     persist(next, immediate);
+    if (patch.title !== undefined) {
+      const targetMeetingId = meeting.id;
+      const nextTitle = patch.title;
+      window.clearTimeout(renameUsageTimerRef.current);
+      renameUsageTimerRef.current = window.setTimeout(() => {
+        void renameMeetingUsage(targetMeetingId, nextTitle)
+          .then(() => refreshMeetingUsage(targetMeetingId))
+          .catch(() => {});
+      }, 600);
+    }
   }
 
   function changeMode(nextMode: string) {
@@ -777,10 +1003,11 @@ export function App() {
             (item) =>
               fullTextMatches?.has(item.id) ||
               normalizeMeetingQuery(item.title).includes(normalizedQuery) ||
+              normalizeMeetingQuery(formatMeetingTitle(t, item.title)).includes(normalizedQuery) ||
               normalizeMeetingQuery(item.notes).includes(normalizedQuery),
           )
         : meetings,
-    [fullTextMatches, meetings, normalizedQuery],
+    [fullTextMatches, meetings, normalizedQuery, t],
   );
   const formattedElapsed = formatTimestamp(elapsed * 1000);
 
@@ -794,7 +1021,7 @@ export function App() {
         className={`sidebar ${drawerOpen ? 'open' : ''}`}
         role={drawerOpen ? 'dialog' : undefined}
         aria-modal={drawerOpen || undefined}
-        aria-label="會議側邊欄"
+        aria-label={t('會議側邊欄')}
       >
         <div className="brand-row">
           <div className="brand">
@@ -802,14 +1029,14 @@ export function App() {
               <IconBrandMark size={20} />
             </span>
             <span>
-              PolyMeet<small>MEETING WORKSPACE</small>
+              PolyMeet<small>{t('會議工作區')}</small>
             </span>
           </div>
           <button
             ref={drawerCloseRef}
             type="button"
             className="icon-button mobile-drawer-close"
-            aria-label="關閉會議列表"
+            aria-label={t('關閉會議列表')}
             onClick={() => setDrawerOpen(false)}
           >
             <IconX size={18} />
@@ -818,11 +1045,11 @@ export function App() {
 
         <button type="button" className="new" onClick={create} disabled={workspaceLocked}>
           <IconPlus size={16} />
-          <span>新增會議</span>
+          <span>{t('新增會議')}</span>
         </button>
 
         <div className="side-label">
-          <span>會議列表</span>
+          <span>{t('會議列表')}</span>
           <span className="count">{meetings.length}</span>
         </div>
 
@@ -831,14 +1058,14 @@ export function App() {
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="搜尋會議內容…"
-            aria-label="搜尋會議"
+            placeholder={t('搜尋會議內容…')}
+            aria-label={t('搜尋會議')}
           />
           {query && (
             <button
               type="button"
               className="search-clear"
-              aria-label="清除搜尋"
+              aria-label={t('清除搜尋')}
               onClick={() => setQuery('')}
             >
               <IconX size={13} />
@@ -849,7 +1076,7 @@ export function App() {
         <div className="meeting-list" aria-busy={searchPending}>
           {fullTextResult?.matches === null && (
             <p className="sidebar-empty" role="status">
-              無法搜尋逐字稿與 AI 紀錄
+              {t('無法搜尋逐字稿與 AI 紀錄')}
             </p>
           )}
           {filteredMeetings.length > 0 ? (
@@ -869,38 +1096,43 @@ export function App() {
                 </span>
                 <span className="meeting-info">
                   <span className="meeting-title-line">
-                    <strong>{m.title || '未命名會議'}</strong>
-                    {m.mode === '雙語會議' && <span className="meeting-mode-pill">雙語</span>}
+                    <strong>{formatMeetingTitle(t, m.title)}</strong>
+                    {m.mode === '雙語會議' && (
+                      <span className="meeting-mode-pill">{t('雙語')}</span>
+                    )}
                   </span>
-                  <small>{new Date(m.createdAt).toLocaleDateString('zh-TW')}</small>
+                  <small>{new Date(m.createdAt).toLocaleDateString(locale)}</small>
                   {fullTextMatches?.has(m.id) && (
                     <small className="meeting-search-match">
-                      命中{' '}
-                      {[...fullTextMatches.get(m.id)!]
-                        .map((source) => SEARCH_SOURCE_LABELS[source])
-                        .join('、')}
+                      {t('命中')}{' '}
+                      {new Intl.ListFormat(locale, { type: 'unit' }).format(
+                        [...fullTextMatches.get(m.id)!].map((source) =>
+                          t(SEARCH_SOURCE_LABELS[source]),
+                        ),
+                      )}
                     </small>
                   )}
                 </span>
               </button>
             ))
           ) : searchPending ? (
-            <p className="sidebar-empty">搜尋中…</p>
+            <p className="sidebar-empty">{t('搜尋中…')}</p>
           ) : meetings.length > 0 ? (
             <div className="sidebar-empty">
-              <p>找不到符合的會議</p>
+              <p>{t('找不到符合的會議')}</p>
               <button type="button" className="secondary small-button" onClick={() => setQuery('')}>
-                清除搜尋
+                {t('清除搜尋')}
               </button>
             </div>
           ) : (
             <div className="sidebar-empty">
-              <p>尚無會議紀錄</p>
+              <p>{t('尚無會議紀錄')}</p>
             </div>
           )}
         </div>
 
         <LocalWorkspace
+          user={user}
           selectedMeeting={meeting}
           meetingCount={meetings.length}
           locked={workspaceLocked || savingRecording}
@@ -910,6 +1142,15 @@ export function App() {
               [...current, ...imported].sort((a, b) => b.createdAt - a.createdAt),
             );
             setSelected((current) => current ?? imported[0]?.id ?? null);
+          }}
+          onChangePassword={() => setPasswordDialogOpen(true)}
+          onLogout={() => {
+            void (async () => {
+              await flushAllPendingWrites().catch(() => {});
+              await onLogout().catch((error: unknown) => {
+                setError(error instanceof Error ? error.message : '無法登出，請稍後再試。');
+              });
+            })();
           }}
         />
       </aside>
@@ -921,7 +1162,7 @@ export function App() {
               ref={mobileMenuButtonRef}
               type="button"
               className="icon-button mobile-menu-button"
-              aria-label="開啟會議列表"
+              aria-label={t('開啟會議列表')}
               aria-expanded={drawerOpen}
               aria-controls="meeting-sidebar"
               onClick={() => setDrawerOpen((value) => !value)}
@@ -929,20 +1170,40 @@ export function App() {
               <IconMenu size={18} />
             </button>
             <div className="breadcrumbs">
-              <span>工作空間</span>
+              <span>{t('工作空間')}</span>
               <b>/</b>
-              <strong className="crumb-current">{meeting?.title || '歡迎使用'}</strong>
+              <strong className="crumb-current">
+                {meeting ? formatMeetingTitle(t, meeting.title) : t('歡迎使用')}
+              </strong>
             </div>
           </div>
 
           <div className="top-actions">
+            <button
+              type="button"
+              className="secondary small-button topbar-nav-btn"
+              onClick={() => setDashboardOpen(true)}
+            >
+              <IconBarChart size={15} />
+              <span>{t('費用紀錄')}</span>
+            </button>
+            {user.role === 'admin' && (
+              <button
+                type="button"
+                className="secondary small-button topbar-nav-btn"
+                onClick={() => setAdminOpen(true)}
+              >
+                <IconShield size={15} />
+                <span>{t('管理後台')}</span>
+              </button>
+            )}
             {serverHealth === null ? (
               <span className="health-pill checking">
-                <i /> 連線檢查中…
+                <i /> {t('連線檢查中…')}
               </span>
             ) : serverHealth.ok ? (
               <span className="health-pill online">
-                <i /> 本機後端已連線
+                <i /> {t('本機後端已連線')}
               </span>
             ) : (
               <button
@@ -951,11 +1212,12 @@ export function App() {
                 onClick={() => void refreshHealth()}
               >
                 <IconRefresh size={12} />
-                <span>離線模式・點此重試</span>
+                <span>{t('離線模式・點此重試')}</span>
               </button>
             )}
             <SettingsDialog
               settings={settings}
+              user={user}
               serverHealth={serverHealth}
               onRefreshHealth={() => void refreshHealth()}
               onSave={handleSaveSettings}
@@ -967,7 +1229,7 @@ export function App() {
           <div className="global-error">
             <p className="error" role="alert">
               <IconAlertCircle size={16} />
-              <span>{error}</span>
+              <span>{localize(error)}</span>
             </p>
           </div>
         )}
@@ -976,17 +1238,17 @@ export function App() {
           <div className="workspace">
             <div className="heading">
               <div className="heading-main">
-                <div className="eyebrow">MEETING WORKSPACE</div>
+                <div className="eyebrow">{t('會議工作區')}</div>
                 <input
                   className="title-input"
-                  aria-label="會議名稱"
-                  placeholder="輸入會議名稱…"
+                  aria-label={t('會議名稱')}
+                  placeholder={t('未命名會議')}
                   value={meeting.title}
                   onChange={(e) => update({ title: e.target.value })}
                 />
                 <div className="heading-meta">
                   <span>
-                    {new Date(meeting.createdAt).toLocaleDateString('zh-TW', {
+                    {new Date(meeting.createdAt).toLocaleDateString(locale, {
                       year: 'numeric',
                       month: 'long',
                       day: 'numeric',
@@ -996,19 +1258,47 @@ export function App() {
                   <span className="dot" aria-hidden="true">
                     ·
                   </span>
-                  <span>{meeting.mode}</span>
+                  <span>{localize(meeting.mode)}</span>
                   <span className="dot" aria-hidden="true">
                     ·
                   </span>
-                  <span>{segments.length} 段逐字稿</span>
+                  <span>{t('{1} 段逐字稿', segments.length)}</span>
                   {recordings.length > 0 && (
                     <>
                       <span className="dot" aria-hidden="true">
                         ·
                       </span>
-                      <span>{recordings.length} 份錄音</span>
+                      <span>{t('{1} 份錄音', recordings.length)}</span>
                     </>
                   )}
+                  {meetingUsage &&
+                    (meetingUsage.totalTokens > 0 ||
+                      meetingUsage.costUsd > 0 ||
+                      meetingUsage.durationSeconds > 0 ||
+                      meetingUsage.pendingCalls > 0) && (
+                      <>
+                        <span className="dot" aria-hidden="true">
+                          ·
+                        </span>
+                        <button
+                          type="button"
+                          className="meeting-cost-pill"
+                          onClick={() =>
+                            setSummaryModal({ summary: meetingUsage, mode: 'meeting' })
+                          }
+                        >
+                          {t('累計')} {formatUsd(meetingUsage.costUsd)}
+                          {formatConvertedCurrency(meetingUsage.costUsd, currency, locale)
+                            ? ` (${formatConvertedCurrency(meetingUsage.costUsd, currency, locale)})`
+                            : ''}
+                          {' · '}
+                          {t('{1} Token', meetingUsage.totalTokens)}
+                          {meetingUsage.pendingCalls > 0
+                            ? t(' · {1} 筆待核對', meetingUsage.pendingCalls)
+                            : ''}
+                        </button>
+                      </>
+                    )}
                 </div>
               </div>
 
@@ -1020,13 +1310,13 @@ export function App() {
                 >
                   <i aria-hidden="true" />
                   {recording
-                    ? `${paused ? '已暫停' : '錄音中'} ${formattedElapsed}`
+                    ? `${paused ? t('已暫停') : t('錄音中')} ${formattedElapsed}`
                     : busy
-                      ? '處理中'
-                      : '準備就緒'}
+                      ? t('處理中')
+                      : t('準備就緒')}
                 </span>
                 <DeleteMeetingDialog
-                  title={meeting.title}
+                  title={formatMeetingTitle(t, meeting.title)}
                   disabled={workspaceLocked}
                   onDelete={async () => {
                     translationQueueRef.current?.cancel();
@@ -1046,17 +1336,17 @@ export function App() {
               </div>
             </div>
 
-            <section className="card capture-card" aria-label="錄音與即時轉錄控制">
+            <section className="card capture-card" aria-label={t('錄音與即時轉錄控制')}>
               <div className="capture-header">
                 <div className="capture-title-block">
-                  <div className="eyebrow">CAPTURE STUDIO</div>
-                  <h2>即時收音與同步轉錄</h2>
+                  <div className="eyebrow">{t('收音工作區')}</div>
+                  <h2>{t('即時收音與同步轉錄')}</h2>
                   <p>
                     {recording
                       ? paused
-                        ? '錄音已暫停，可隨時繼續或結束保存。'
-                        : '音訊約每秒分段保存。需要重整時，請先儲存錄音。'
-                      : '選擇會議模式、音訊來源與語言後即可開始錄音。'}
+                        ? t('錄音已暫停，可隨時繼續或結束保存。')
+                        : t('音訊約每秒分段保存。需要重整時，請先儲存錄音。')
+                      : t('選擇會議模式、音訊來源與語言後即可開始錄音。')}
                   </p>
                 </div>
 
@@ -1071,7 +1361,7 @@ export function App() {
                         onClick={() => void togglePause()}
                       >
                         <IconPause size={14} />
-                        <span>{paused ? '繼續' : '暫停'}</span>
+                        <span>{paused ? t('繼續') : t('暫停')}</span>
                       </button>
                       <button
                         type="button"
@@ -1080,7 +1370,7 @@ export function App() {
                         onClick={() => void saveRecordingAndReload()}
                       >
                         <IconRefresh size={14} />
-                        <span>儲存錄音並重整</span>
+                        <span>{t('儲存錄音並重整')}</span>
                       </button>
                     </>
                   )}
@@ -1091,15 +1381,15 @@ export function App() {
                     onClick={recording ? stop : start}
                   >
                     {recording ? <IconStop size={15} /> : <IconMic size={16} />}
-                    <span>{recording ? '停止錄音' : '開始錄音'}</span>
+                    <span>{recording ? t('停止錄音') : t('開始錄音')}</span>
                   </button>
                 </div>
               </div>
 
               <div className="capture-controls">
                 <div className="control-block mode-block">
-                  <span className="field-caption">會議模式</span>
-                  <div className="segmented-control" role="group" aria-label="會議模式">
+                  <span className="field-caption">{t('會議模式')}</span>
+                  <div className="segmented-control" role="group" aria-label={t('會議模式')}>
                     {(['一般會議', '雙語會議'] as const).map((modeOption) => (
                       <button
                         key={modeOption}
@@ -1109,35 +1399,37 @@ export function App() {
                         aria-pressed={meeting.mode === modeOption}
                         onClick={() => changeMode(modeOption)}
                       >
-                        {modeOption}
+                        {t(modeOption)}
                       </button>
                     ))}
                   </div>
                 </div>
 
                 <label className="control-block source-block">
-                  <span>音訊來源</span>
+                  <span>{t('音訊來源')}</span>
                   <select
                     id="source"
                     disabled={workspaceLocked}
                     value={source}
                     onChange={(e) => setSource(e.target.value as 'mic' | 'both')}
                   >
-                    <option value="mic">僅麥克風</option>
-                    <option value="both">麥克風 + 分頁音訊</option>
+                    <option value="mic">{t('僅麥克風')}</option>
+                    <option value="both">{t('麥克風 + 分頁音訊')}</option>
                   </select>
                 </label>
 
                 <div className="language-pair">
                   <label className="control-block">
-                    <span>{meeting.mode === '雙語會議' ? '語言一' : '逐字稿語言'}</span>
+                    <span>{meeting.mode === '雙語會議' ? t('語言一') : t('逐字稿語言')}</span>
                     <select
                       value={meeting.sourceLang || '繁體中文'}
                       disabled={workspaceLocked}
                       onChange={(e) => update({ sourceLang: e.target.value }, true)}
                     >
                       {languages.map((language) => (
-                        <option key={language.code}>{language.label}</option>
+                        <option key={language.code} lang={language.code}>
+                          {language.label}
+                        </option>
                       ))}
                     </select>
                   </label>
@@ -1147,21 +1439,23 @@ export function App() {
                       <button
                         type="button"
                         className="icon-button swap-button"
-                        aria-label="交換語言一與語言二"
+                        aria-label={t('交換語言一與語言二')}
                         disabled={workspaceLocked}
                         onClick={swapLanguages}
                       >
                         <IconSwap size={15} />
                       </button>
                       <label className="control-block">
-                        <span>語言二</span>
+                        <span>{t('語言二')}</span>
                         <select
                           value={meeting.targetLang || 'English'}
                           disabled={workspaceLocked}
                           onChange={(e) => update({ targetLang: e.target.value }, true)}
                         >
                           {languages.map((language) => (
-                            <option key={language.code}>{language.label}</option>
+                            <option key={language.code} lang={language.code}>
+                              {language.label}
+                            </option>
                           ))}
                         </select>
                       </label>
@@ -1177,7 +1471,7 @@ export function App() {
                       disabled={workspaceLocked}
                       onChange={(e) => setLiveEnabled(e.target.checked)}
                     />
-                    <span>啟用即時轉錄</span>
+                    <span>{t('啟用即時轉錄')}</span>
                   </label>
                   {meeting.mode === '雙語會議' && (
                     <ProjectionOverlay
@@ -1199,19 +1493,19 @@ export function App() {
 
               {liveStatus && (
                 <p className="hint status-feedback" role="status">
-                  {liveStatus}
+                  {localize(liveStatus)}
                 </p>
               )}
               {translationStatus && (
                 <p className="error" role="alert">
                   <IconAlertCircle size={15} />
-                  <span>{translationStatus}</span>
+                  <span>{localize(translationStatus)}</span>
                 </p>
               )}
               {error && (
                 <p className="error" role="alert">
                   <IconAlertCircle size={15} />
-                  <span>{error}</span>
+                  <span>{localize(error)}</span>
                 </p>
               )}
 
@@ -1260,13 +1554,15 @@ export function App() {
                   onRecordingSaved={handleRecordingSaved}
                   onBusyChange={setUploading}
                   onSeek={handleSeekRecording}
+                  onUsageSessionCompleted={handleUsageSessionCompleted}
+                  onUsageActivity={refreshMeetingUsage}
                   editSaves={transcriptSaves}
                   settings={settings}
                   locked={recording || busy || generating}
                 />
               </div>
 
-              <aside className="studio-column" aria-label="筆記與會議紀錄工作區">
+              <aside className="studio-column" aria-label={t('筆記與會議紀錄工作區')}>
                 <div className="studio-tabs-header">
                   <div className="segmented-control studio-tabs" role="tablist">
                     <button
@@ -1277,9 +1573,9 @@ export function App() {
                       onClick={() => setStudioTab('notes')}
                     >
                       <IconFileText size={15} />
-                      <span>會議筆記</span>
+                      <span>{t('會議筆記')}</span>
                       {meeting.notes.length > 0 && (
-                        <span className="tab-badge">{meeting.notes.length} 字</span>
+                        <span className="tab-badge">{t('{1} 字', meeting.notes.length)}</span>
                       )}
                     </button>
                     <button
@@ -1290,9 +1586,9 @@ export function App() {
                       onClick={() => setStudioTab('minutes')}
                     >
                       <IconSparkles size={15} />
-                      <span>AI 紀錄</span>
+                      <span>{t('AI 紀錄')}</span>
                       {generating ? (
-                        <span className="pulse-dot" aria-label="生成中" />
+                        <span className="pulse-dot" aria-label={t('生成中')} />
                       ) : minutesCount > 0 ? (
                         <span className="tab-badge">{minutesCount}</span>
                       ) : null}
@@ -1302,15 +1598,15 @@ export function App() {
 
                 <div className="card studio-panel" hidden={studioTab !== 'notes'}>
                   <div className="notes-toolbar">
-                    <span>自由記錄</span>
-                    <span className="toolbar-hint">自動儲存於本機</span>
+                    <span>{t('自由記錄')}</span>
+                    <span className="toolbar-hint">{t('自動儲存於本機')}</span>
                   </div>
                   <textarea
                     className="notes-textarea"
                     value={meeting.notes}
                     onChange={(e) => update({ notes: e.target.value })}
-                    placeholder="在這裡寫下會議重點、想法、關鍵決策或待辦事項…"
-                    aria-label="會議筆記"
+                    placeholder={t('在這裡寫下會議重點、想法、關鍵決策或待辦事項…')}
+                    aria-label={t('會議筆記')}
                   />
                 </div>
 
@@ -1324,6 +1620,8 @@ export function App() {
                     settings={settings}
                     onBusyChange={setGenerating}
                     onRecordsCountChange={setMinutesCount}
+                    onUsageSessionCompleted={handleUsageSessionCompleted}
+                    onUsageActivity={refreshMeetingUsage}
                     editSaves={minutesSaves}
                   />
                 </div>
@@ -1333,7 +1631,7 @@ export function App() {
             <footer>
               <span>PolyMeet</span>
               <span aria-hidden="true">·</span>
-              <span>本機優先會議工作區</span>
+              <span>{t('本機優先會議工作區')}</span>
             </footer>
           </div>
         ) : (
@@ -1341,28 +1639,230 @@ export function App() {
             <div className="empty-icon" aria-hidden="true">
               <IconBrandMark size={30} />
             </div>
-            <div className="eyebrow">WELCOME TO POLYMEET</div>
+            <div className="eyebrow">{t('歡迎使用 PolyMeet')}</div>
             <h1>
-              讓每場對話
+              {t('讓每場對話')}
               <br />
-              都有跡可循。
+              {t('都有跡可循。')}
             </h1>
             <p>
-              會議資料保存在此瀏覽器。使用轉錄、翻譯與 AI
-              紀錄時，相關音訊或文字會傳送至你選擇的服務。
+              {t(
+                '會議資料保存在此瀏覽器。使用轉錄、翻譯與 AI 紀錄時，相關音訊或文字會傳送至你選擇的服務。',
+              )}
             </p>
             <div className="empty-capabilities">
-              <span>雙軌即時轉錄</span>
-              <span>雙語同步投影字幕</span>
-              <span>本機優先防遺失</span>
+              <span>{t('雙軌即時轉錄')}</span>
+              <span>{t('雙語同步投影字幕')}</span>
+              <span>{t('本機優先防遺失')}</span>
             </div>
             <button type="button" className="record empty-cta" onClick={create}>
               <IconPlus size={16} />
-              <span>建立第一場會議</span>
+              <span>{t('建立第一場會議')}</span>
             </button>
           </div>
         )}
       </main>
+
+      <UsageSummaryDialog
+        summary={summaryModal?.summary ?? null}
+        mode={summaryModal?.mode ?? 'session'}
+        currency={currency}
+        onClose={() => setSummaryModal(null)}
+        onOpenDashboard={() => setDashboardOpen(true)}
+      />
+
+      <UsageDashboardDialog open={dashboardOpen} onClose={() => setDashboardOpen(false)} />
+
+      <ChangePasswordDialog
+        open={passwordDialogOpen}
+        onClose={() => setPasswordDialogOpen(false)}
+      />
+
+      {user.role === 'admin' && (
+        <AdminDialog
+          open={adminOpen}
+          currentUser={user}
+          onClose={() => setAdminOpen(false)}
+          onPricingChanged={() => void refreshPricingCurrency()}
+        />
+      )}
     </div>
+  );
+}
+
+export function App() {
+  const { t, localize } = useI18n();
+  const [status, setStatus] = useState<'loading' | 'unauthenticated' | 'authenticated'>('loading');
+  const [needsSetup, setNeedsSetup] = useState(false);
+  const [setupAvailable, setSetupAvailable] = useState(false);
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [initialHealth, setInitialHealth] = useState<ServerHealth | null>(null);
+  const [loadError, setLoadError] = useState('');
+  const [accountChanged, setAccountChanged] = useState(false);
+  const authCheck = useRef(0);
+
+  const handleAuthLost = useCallback(() => {
+    authCheck.current += 1;
+    setUser(null);
+    setStatus('unauthenticated');
+  }, []);
+
+  const bootstrapAuth = useCallback(
+    async (initial = false) => {
+      const check = ++authCheck.current;
+      if (initial) setLoadError('');
+      try {
+        const response = await fetch('/api/health');
+        if (!response.ok) throw new Error();
+        const data = await response.json();
+        if (check !== authCheck.current) return;
+        const nextUser = data?.authenticated ? (data.user as AuthUser) : null;
+        setNeedsSetup(Boolean(data?.needsSetup));
+        setSetupAvailable(Boolean(data?.setupAvailable));
+        if (nextUser && !bindWorkspaceAccount(nextUser.id)) {
+          handleAuthLost();
+          setAccountChanged(true);
+          return;
+        }
+        if (nextUser) {
+          setMeetingDbNamespace(nextUser.id);
+          setSettingsNamespace(nextUser.id);
+        }
+        setInitialHealth({
+          ok: true,
+          openai: Boolean(data?.serverKeys?.openai),
+          gemini: Boolean(data?.serverKeys?.gemini),
+        });
+        setAccountChanged(false);
+        setUser(nextUser);
+        setStatus(nextUser ? 'authenticated' : 'unauthenticated');
+        setLoadError('');
+      } catch {
+        if (initial && check === authCheck.current) {
+          setLoadError('無法連線至 PolyMeet 後端服務，請確認伺服器已啟動。');
+          setStatus('unauthenticated');
+        }
+      }
+    },
+    [handleAuthLost],
+  );
+
+  useEffect(() => {
+    const check = () => void bootstrapAuth(!workspaceAccountId());
+    const checkStorage = (event: StorageEvent) => {
+      if (event.key === WORKSPACE_SESSION_CHANGED) check();
+    };
+    const sessionLost = () => {
+      handleAuthLost();
+      check();
+    };
+    void bootstrapAuth(true);
+    window.addEventListener('focus', check);
+    window.addEventListener('pageshow', check);
+    window.addEventListener('storage', checkStorage);
+    window.addEventListener(WORKSPACE_SESSION_CHANGED, sessionLost);
+    return () => {
+      authCheck.current += 1;
+      window.removeEventListener('focus', check);
+      window.removeEventListener('pageshow', check);
+      window.removeEventListener('storage', checkStorage);
+      window.removeEventListener(WORKSPACE_SESSION_CHANGED, sessionLost);
+    };
+  }, [bootstrapAuth, handleAuthLost]);
+
+  const handleAuthenticated = useCallback(
+    (nextUser: AuthUser) => {
+      announceSessionChange();
+      if (!bindWorkspaceAccount(nextUser.id)) {
+        window.location.reload();
+        return;
+      }
+      void bootstrapAuth(true);
+    },
+    [bootstrapAuth],
+  );
+
+  const handleLogout = useCallback(async () => {
+    try {
+      await logoutUser();
+    } catch {
+      // Always clear local session keys and workspace state even if the backend is unreachable.
+    } finally {
+      clearSessionSettings();
+      announceSessionChange();
+      handleAuthLost();
+      setInitialHealth({ ok: true, openai: false, gemini: false });
+    }
+  }, [handleAuthLost]);
+
+  if (status === 'loading') {
+    return (
+      <div className="auth-screen">
+        <div className="auth-card auth-loading">
+          <div className="auth-brand">
+            <span className="brandmark" aria-hidden="true">
+              <IconBrandMark size={22} />
+            </span>
+            <div>
+              <strong>PolyMeet</strong>
+              <small>{t('正在檢查登入狀態…')}</small>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="auth-screen">
+        <div className="auth-card">
+          <LanguageSelect />
+          <p className="error" role="alert">
+            <IconAlertCircle size={16} />
+            <span>{localize(loadError)}</span>
+          </p>
+          <button type="button" className="record" onClick={() => void bootstrapAuth(true)}>
+            <IconRefresh size={15} />
+            <span>{t('重新連線')}</span>
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (accountChanged) {
+    return (
+      <div className="auth-screen">
+        <div className="auth-card">
+          <LanguageSelect />
+          <p role="status">{t('其他分頁已切換登入帳號。請重新開啟工作區。')}</p>
+          <button type="button" className="record" onClick={() => window.location.reload()}>
+            {t('重新開啟工作區')}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (status !== 'authenticated' || !user) {
+    return (
+      <AuthScreen
+        key={String(needsSetup)}
+        needsSetup={needsSetup}
+        setupAvailable={setupAvailable}
+        onAuthenticated={handleAuthenticated}
+      />
+    );
+  }
+
+  return (
+    <WorkspaceApp
+      key={user.id}
+      user={user}
+      initialHealth={initialHealth}
+      onAuthLost={handleAuthLost}
+      onLogout={handleLogout}
+    />
   );
 }

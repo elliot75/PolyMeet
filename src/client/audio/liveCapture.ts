@@ -98,7 +98,7 @@ export class LiveCapture {
           recoverable: true,
         });
     } finally {
-      for (const client of this.clients) client.stop();
+      await Promise.all(this.clients.map((client) => client.stopAndWait()));
       for (const node of this.nodes) node.disconnect();
       if (this.context?.state !== 'closed') await this.context?.close();
     }

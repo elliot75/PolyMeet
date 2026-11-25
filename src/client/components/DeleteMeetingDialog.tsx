@@ -1,3 +1,4 @@
+import { useI18n } from '../i18n/preferences';
 import { useRef, useState, type HTMLAttributes } from 'react';
 import { closeDialogAnimated, isPointerOutsideDialog, openDialogModal } from '../utils/dialog';
 import { IconTrash } from './Icons';
@@ -11,6 +12,7 @@ export function DeleteMeetingDialog({
   disabled: boolean;
   onDelete: () => Promise<void>;
 }) {
+  const { t, localize } = useI18n();
   const dialog = useRef<HTMLDialogElement>(null);
   const keepButtonRef = useRef<HTMLButtonElement>(null);
   const pressedOutside = useRef(false);
@@ -43,7 +45,7 @@ export function DeleteMeetingDialog({
         }}
       >
         <IconTrash size={14} />
-        <span>刪除會議</span>
+        <span>{t('刪除會議')}</span>
       </button>
       <dialog
         ref={dialog}
@@ -78,13 +80,13 @@ export function DeleteMeetingDialog({
         <div className="danger-badge" aria-hidden="true">
           <IconTrash size={20} />
         </div>
-        <h2 id="delete-title">刪除這場會議？</h2>
+        <h2 id="delete-title">{t('刪除這場會議？')}</h2>
         <p className="hint">
-          「{title}」及其錄音、逐字稿和會議紀錄將從這個瀏覽器永久移除，無法復原。
+          {t('「{1}」及其錄音、逐字稿和會議紀錄將從這個瀏覽器永久移除，無法復原。', title)}
         </p>
         {error && (
           <p className="error" role="alert">
-            {error}
+            {localize(error)}
           </p>
         )}
         <div className="dialog-actions">
@@ -95,7 +97,7 @@ export function DeleteMeetingDialog({
             disabled={busy}
             onClick={() => void closeDialogAnimated(dialog.current)}
           >
-            保留會議
+            {t('保留會議')}
           </button>
           <button
             type="button"
@@ -103,7 +105,7 @@ export function DeleteMeetingDialog({
             disabled={busy}
             onClick={() => void remove()}
           >
-            {busy ? '刪除中…' : '確認刪除'}
+            {busy ? t('刪除中…') : t('確認刪除')}
           </button>
         </div>
       </dialog>

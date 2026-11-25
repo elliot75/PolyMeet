@@ -1,3 +1,4 @@
+import { workspaceFetch } from './workspaceSession';
 import { OPENAI_MAX_AUDIO_SECONDS, splitAudio } from '../audio/audioChunker';
 import { normalizeAudioMime } from '../audio/audioMime';
 import { uploadedSegments, type FileTranscriptionResult } from '../audio/uploadedSegments';
@@ -10,13 +11,23 @@ interface TranscriptionOptions {
   settings: Settings;
   languageHints: string[];
   signal: AbortSignal;
+  meetingTitle?: string;
+  usageSessionId?: string;
   onPartStart: (index: number, total: number) => void;
   onPartComplete: (index: number, cleanupWarning: boolean) => void;
 }
 
 export async function* transcribeAudio(
   file: File,
-  { recording, settings, languageHints, signal, onPartStart }: TranscriptionOptions,
+  {
+    recording,
+    settings,
+    languageHints,
+    signal,
+    meetingTitle,
+    usageSessionId,
+    onPartStart,
+  }: TranscriptionOptions,
   completedParts = 0,
 ) {
   signal.throwIfAborted();
@@ -33,8 +44,15 @@ export async function* transcribeAudio(
       settings.sttProvider === 'openai' ? settings.openaiSttModel : settings.geminiSttModel,
     );
     form.set('file', part.file);
+    form.set('meetingId', recording.meetingId);
+    if (meetingTitle) form.set('meetingTitle', meetingTitle);
+    if (usageSessionId) form.set('usageSessionId', usageSessionId);
+    const partAudioSeconds = part.durationSeconds ?? recording.durationSeconds;
+    if (partAudioSeconds && Number.isFinite(partAudioSeconds) && partAudioSeconds > 0) {
+      form.set('audioSeconds', String(partAudioSeconds));
+    }
     for (const language of languageHints) form.append('language', language);
-    const response = await fetch('/api/transcribe-file', {
+    const response = await workspaceFetch('/api/transcribe-file', {
       method: 'POST',
       headers: headers({ ...settings, provider: settings.sttProvider }),
       body: form,
@@ -45,11 +63,13 @@ export async function* transcribeAudio(
       throw new Error(
         result.cleanupWarning
           ? '轉錄失敗且無法刪除 Google 暫存檔，請至供應商管理介面檢查。'
-          : result.error === 'missing_api_key'
-            ? '請先在設定中加入轉錄服務金鑰。'
-            : result.error === 'auth_failed'
-              ? 'API 金鑰驗證失敗或無此模型權限，請檢查設定。'
-              : '音檔轉錄失敗，請檢查模型、金鑰及後端服務。',
+          : result.error === 'unauthenticated'
+            ? '登入階段已過期，請重新登入。'
+            : result.error === 'missing_api_key'
+              ? '請先在設定中加入轉錄服務金鑰。'
+              : result.error === 'auth_failed'
+                ? 'API 金鑰驗證失敗或無此模型權限，請檢查設定。'
+                : '音檔轉錄失敗，請檢查模型、金鑰及後端服務。',
       );
     }
     const result: FileTranscriptionResult = await response.json();

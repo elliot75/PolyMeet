@@ -1,3 +1,4 @@
+import { useI18n } from '../i18n/preferences';
 import { memo, useEffect, useState } from 'react';
 import { getRecordingBlob, type Recording } from '../db/meetingDb';
 import { formatTimestamp } from '../services/exporter';
@@ -15,6 +16,7 @@ export const RecordingPlayer = memo(function RecordingPlayer({
   disabled: boolean;
   onTranscribe: (recording: Recording) => void;
 }) {
+  const { t, locale } = useI18n();
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
     setUrl(null);
@@ -44,20 +46,20 @@ export const RecordingPlayer = memo(function RecordingPlayer({
       <div className="audio-meta">
         <span>
           {recording.filename ? `${recording.filename} · ` : ''}
-          {new Date(recording.createdAt).toLocaleString('zh-TW')}
+          {new Date(recording.createdAt).toLocaleString(locale)}
           {recording.durationSeconds !== undefined
             ? ` · ${formatTimestamp(recording.durationSeconds * 1000)}`
             : ''}
         </span>
-        {!recording.completed && <span className="pill-warn">錄音中斷・已保存片段</span>}
+        {!recording.completed && <span className="pill-warn">{t('錄音中斷・已保存片段')}</span>}
       </div>
       {hasAudio === false ? (
-        <small>僅保留時間軸資訊（未含錄音檔）</small>
+        <small>{t('僅保留時間軸資訊（未含錄音檔）')}</small>
       ) : hasAudio === undefined || url === '' ? (
-        <small>無法讀取錄音</small>
+        <small>{t('無法讀取錄音')}</small>
       ) : (
         <>
-          {!url && <small role="status">正在載入錄音…</small>}
+          {!url && <small role="status">{t('正在載入錄音…')}</small>}
           {hasAudio && (
             <div className="audio-controls" hidden={!url}>
               <audio
@@ -73,7 +75,7 @@ export const RecordingPlayer = memo(function RecordingPlayer({
                   download={recordingFilename(recording)}
                 >
                   <IconDownload size={14} />
-                  <span>下載音檔</span>
+                  <span>{t('下載音檔')}</span>
                 </a>
               )}
               <button
@@ -83,7 +85,7 @@ export const RecordingPlayer = memo(function RecordingPlayer({
                 onClick={() => onTranscribe(recording)}
               >
                 <IconFileText size={14} />
-                <span>轉錄此錄音</span>
+                <span>{t('轉錄此錄音')}</span>
               </button>
             </div>
           )}

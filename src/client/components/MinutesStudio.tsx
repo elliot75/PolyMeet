@@ -1,8 +1,14 @@
+import { useI18n } from '../i18n/preferences';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { listMinutes, saveMinutes } from '../db/meetingDb';
-import type { MinutesAction, MinutesRecord, MinutesStyle } from '../../shared/types';
+import type {
+  MinutesAction,
+  MinutesRecord,
+  MinutesStyle,
+  UsageSessionKind,
+} from '../../shared/types';
 import { streamText } from '../services/apiClient';
 import { downloadMinutes } from '../services/exporter';
 import type { Settings } from '../services/settings';
@@ -17,6 +23,8 @@ export const MinutesStudio = memo(function MinutesStudio({
   settings,
   onBusyChange,
   onRecordsCountChange,
+  onUsageSessionCompleted,
+  onUsageActivity,
   editSaves,
 }: {
   meetingId: string;
@@ -26,8 +34,20 @@ export const MinutesStudio = memo(function MinutesStudio({
   settings: Settings;
   onBusyChange: (busy: boolean) => void;
   onRecordsCountChange?: (count: number) => void;
+  onUsageSessionCompleted?: (info: {
+    usageSessionId: string;
+    meetingId: string;
+    meetingTitle: string;
+    kind: UsageSessionKind;
+    startedAt: number;
+    endedAt: number;
+    durationSeconds: number;
+  }) => void | Promise<void>;
+  onUsageActivity?: (meetingId: string) => void | Promise<void>;
   editSaves: EditSaveQueue<MinutesRecord>;
 }) {
+  const { t, locale, localize } = useI18n();
+  const bilingualLabel = t('雙語對照');
   const languagesKey = meetingLanguages.join(',');
   const defaultLanguage =
     meetingLanguages.length > 1 ? '雙語對照' : meetingLanguages[0] || '繁體中文';
@@ -124,6 +144,9 @@ export const MinutesStudio = memo(function MinutesStudio({
     setError('');
     setNotice('');
     let output = '';
+    let requestSent = false;
+    const usageSessionId = crypto.randomUUID();
+    const startedAt = Date.now();
     try {
       if (!(await flushEdits())) {
         setError('無法保存目前的會議紀錄修改，請檢查瀏覽器儲存空間後重試。');
@@ -133,6 +156,7 @@ export const MinutesStudio = memo(function MinutesStudio({
       setContent('');
       setActive(null);
       setPreview(false);
+      requestSent = true;
       await streamText(
         settings,
         'minutes',
@@ -142,6 +166,9 @@ export const MinutesStudio = memo(function MinutesStudio({
           style,
           targetLanguage: language.trim(),
           meetingLanguages: languagesKey,
+          meetingId,
+          meetingTitle: meetingTitle || '未命名會議',
+          usageSessionId,
         },
         (part) => {
           output += part;
@@ -149,10 +176,11 @@ export const MinutesStudio = memo(function MinutesStudio({
         },
         controller.signal,
       );
+      const endedAt = Date.now();
       const record: MinutesRecord = {
         id: crypto.randomUUID(),
         meetingId,
-        createdAt: Date.now(),
+        createdAt: endedAt,
         action,
         style,
         targetLanguage: language.trim(),
@@ -162,6 +190,15 @@ export const MinutesStudio = memo(function MinutesStudio({
       setRecords((old) => [record, ...old]);
       setActive(record.id);
       setPreview(true);
+      await onUsageSessionCompleted?.({
+        usageSessionId,
+        meetingId,
+        meetingTitle: meetingTitle || '未命名會議',
+        kind: 'minutes',
+        startedAt,
+        endedAt,
+        durationSeconds: Math.max(0, (endedAt - startedAt) / 1000),
+      });
     } catch (e) {
       if (controller.signal.aborted) {
         setNotice(
@@ -170,6 +207,7 @@ export const MinutesStudio = memo(function MinutesStudio({
       } else {
         setError(e instanceof Error ? e.message : '生成失敗，請重試。');
       }
+      if (requestSent) void onUsageActivity?.(meetingId);
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
       setBusy(false);
@@ -239,8 +277,8 @@ export const MinutesStudio = memo(function MinutesStudio({
     <section className="minutes">
       <div className="minutes-controls">
         <div className="control-block action-block">
-          <span className="field-caption">處理方式</span>
-          <div className="segmented-control" role="group" aria-label="會議紀錄處理方式">
+          <span className="field-caption">{t('處理方式')}</span>
+          <div className="segmented-control" role="group" aria-label={t('會議紀錄處理方式')}>
             <button
               type="button"
               className={action === 'polish' ? 'active' : ''}
@@ -248,7 +286,7 @@ export const MinutesStudio = memo(function MinutesStudio({
               aria-pressed={action === 'polish'}
               onClick={() => setAction('polish')}
             >
-              僅潤飾
+              {t('僅潤飾')}
             </button>
             <button
               type="button"
@@ -257,18 +295,20 @@ export const MinutesStudio = memo(function MinutesStudio({
               aria-pressed={action === 'translate_and_polish'}
               onClick={() => setAction('translate_and_polish')}
             >
-              翻譯並潤飾
+              {t('翻譯並潤飾')}
             </button>
           </div>
         </div>
 
         <label>
-          輸出語言
+          {t('輸出語言')}
           <input
             list="minutes-languages"
-            value={language}
+            value={language === '雙語對照' ? bilingualLabel : language}
             disabled={busy}
-            onChange={(e) => setLanguage(e.target.value)}
+            onChange={(event) =>
+              setLanguage(event.target.value === bilingualLabel ? '雙語對照' : event.target.value)
+            }
           />
         </label>
         <datalist id="minutes-languages">
@@ -285,20 +325,20 @@ export const MinutesStudio = memo(function MinutesStudio({
             'Español',
             '雙語對照',
           ].map((item) => (
-            <option key={item} value={item} />
+            <option key={item} value={item === '雙語對照' ? bilingualLabel : item} />
           ))}
         </datalist>
 
         <label>
-          紀錄風格
+          {t('紀錄風格')}
           <select
             value={style}
             disabled={busy}
             onChange={(e) => setStyle(e.target.value as MinutesStyle)}
           >
-            <option value="standard">標準紀要</option>
-            <option value="action_items">行動清單優先</option>
-            <option value="detailed">詳細脈絡</option>
+            <option value="standard">{t('標準紀要')}</option>
+            <option value="action_items">{t('行動清單優先')}</option>
+            <option value="detailed">{t('詳細脈絡')}</option>
           </select>
         </label>
 
@@ -312,19 +352,19 @@ export const MinutesStudio = memo(function MinutesStudio({
             {busy ? (
               <>
                 <IconStop size={14} />
-                <span>停止生成</span>
+                <span>{t('停止生成')}</span>
               </>
             ) : (
               <>
                 <IconSparkles size={15} />
-                <span>生成 AI 紀錄</span>
+                <span>{t('生成 AI 紀錄')}</span>
               </>
             )}
           </button>
 
           {records.length > 0 && (
             <label className="version-label">
-              <span>歷史版本（{records.length}）</span>
+              <span>{t('歷史版本（{1}）', records.length)}</span>
               <select
                 value={active ?? ''}
                 disabled={busy}
@@ -339,12 +379,15 @@ export const MinutesStudio = memo(function MinutesStudio({
                 }}
               >
                 <option value="" disabled>
-                  選擇版本
+                  {t('選擇版本')}
                 </option>
                 {records.map((item) => (
                   <option key={item.id} value={item.id}>
-                    {new Date(item.createdAt).toLocaleString('zh-TW')} ·{' '}
-                    {item.action === 'polish' ? '潤飾' : '翻譯'} · {item.targetLanguage}
+                    {new Date(item.createdAt).toLocaleString(locale)} ·{' '}
+                    {item.action === 'polish' ? t('潤飾') : t('翻譯')} ·{' '}
+                    {item.targetLanguage === '雙語對照'
+                      ? t(item.targetLanguage)
+                      : item.targetLanguage}
                   </option>
                 ))}
               </select>
@@ -353,30 +396,32 @@ export const MinutesStudio = memo(function MinutesStudio({
         </div>
       </div>
 
-      <p className="hint">彙整會議筆記與逐字稿產出結構化紀錄；建議發表前覆核 AI 生成內容。</p>
+      <p className="hint">
+        {t('彙整會議筆記與逐字稿產出結構化紀錄；建議發表前覆核 AI 生成內容。')}
+      </p>
 
       {notice && (
         <p className="hint status-feedback" role="status">
-          {notice}
+          {localize(notice)}
         </p>
       )}
       {error && (
         <p className="error" role="alert">
-          {error}
+          {localize(error)}
         </p>
       )}
 
       {(content || busy) && (
         <div className="minutes-output">
           <div className="minutes-toolbar">
-            <div className="segmented-control compact" role="group" aria-label="檢視模式">
+            <div className="segmented-control compact" role="group" aria-label={t('檢視模式')}>
               <button
                 type="button"
                 className={preview ? 'active' : ''}
                 aria-pressed={preview}
                 onClick={() => setPreview(true)}
               >
-                預覽
+                {t('預覽')}
               </button>
               <button
                 type="button"
@@ -384,13 +429,19 @@ export const MinutesStudio = memo(function MinutesStudio({
                 aria-pressed={!preview}
                 onClick={() => setPreview(false)}
               >
-                編輯
+                {t('編輯')}
               </button>
             </div>
 
             <div className="minutes-status-group">
               <span className="save-status" role="status">
-                {busy ? '生成中…' : saving ? '儲存中…' : active ? '修改自動保存' : '未保存草稿'}
+                {busy
+                  ? t('生成中…')
+                  : saving
+                    ? t('儲存中…')
+                    : active
+                      ? t('修改自動保存')
+                      : t('未保存草稿')}
               </span>
               {!busy && content && !active && (
                 <button
@@ -399,7 +450,7 @@ export const MinutesStudio = memo(function MinutesStudio({
                   disabled={saving}
                   onClick={() => void saveDraft()}
                 >
-                  儲存為版本
+                  {t('儲存為版本')}
                 </button>
               )}
             </div>
@@ -412,7 +463,7 @@ export const MinutesStudio = memo(function MinutesStudio({
                 onClick={() => void copyContent()}
               >
                 {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
-                <span>{copied ? '已複製' : '複製'}</span>
+                <span>{copied ? t('已複製') : t('複製')}</span>
               </button>
               <button
                 type="button"
@@ -453,7 +504,7 @@ export const MinutesStudio = memo(function MinutesStudio({
           ) : (
             <textarea
               className="minutes-editor"
-              aria-label="會議紀錄內容"
+              aria-label={t('會議紀錄內容')}
               disabled={busy}
               value={content}
               onChange={(e) => edit(e.target.value)}

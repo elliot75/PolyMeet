@@ -1,3 +1,4 @@
+import { workspaceAccountId } from '../services/workspaceSession';
 import type { SttClientMessage, SttServerEvent, SttStart } from '../../shared/protocol';
 import { usesManualCommit } from '../../shared/models';
 
@@ -28,10 +29,16 @@ export class LiveSttClient {
   private connectionId = '';
   private awaitingFinal = new Set<string>();
   private pendingSpeechAt: number[] = [];
+  private stopWaiters: Array<() => void> = [];
   constructor(
     private start: SttStart,
     private onEvent: (event: SttServerEvent) => void,
   ) {}
+  private resolveStopWaiters() {
+    if (!this.stopWaiters.length) return;
+    const waiters = this.stopWaiters.splice(0);
+    for (const resolve of waiters) resolve();
+  }
   private get sendsCommit(): boolean {
     return (
       usesManualCommit(this.start.provider, this.start.model.trim()) ||
@@ -81,6 +88,7 @@ export class LiveSttClient {
     this.ready = false;
     this.sentBytes = 0;
     this.connectionId = crypto.randomUUID();
+    const accountId = workspaceAccountId();
     const socket = new WebSocket(
       `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/stt`,
     );
@@ -91,14 +99,22 @@ export class LiveSttClient {
       socket.close();
     }, READY_TIMEOUT_MS);
     socket.onopen = () => {
-      if (!this.stopped && this.socket === socket) socket.send(JSON.stringify(this.start));
+      if (!this.stopped && this.socket === socket)
+        socket.send(JSON.stringify({ ...this.start, accountId }));
     };
     socket.onmessage = (message) => {
-      if (this.stopped || this.socket !== socket) return;
+      if (this.socket !== socket) return;
       let event: SttServerEvent;
       try {
         event = JSON.parse(message.data) as SttServerEvent;
       } catch {
+        return;
+      }
+      if (this.stopped) {
+        if (event.type === 'usage.recorded') {
+          this.onEvent(event);
+          this.resolveStopWaiters();
+        }
         return;
       }
       if (event.type === 'session.ready') {
@@ -176,6 +192,7 @@ export class LiveSttClient {
       this.ready = false;
       window.clearTimeout(this.readyTimer);
       window.clearTimeout(this.pumpTimer);
+      this.resolveStopWaiters();
       if (!this.stopped) {
         const replay = this.committed.flatMap((batch) => batch.messages);
         const pending = [...replay, ...this.sent, ...this.queue];
@@ -336,5 +353,31 @@ export class LiveSttClient {
     if (this.socket?.readyState === WebSocket.OPEN)
       this.socket.send(JSON.stringify({ type: 'session.stop' }));
     this.socket?.close();
+    this.resolveStopWaiters();
+  }
+  async stopAndWait(timeoutMs = 1200) {
+    const socket = this.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      this.stop();
+      return;
+    }
+    this.stopped = true;
+    window.clearTimeout(this.timer);
+    window.clearTimeout(this.pumpTimer);
+    window.clearTimeout(this.readyTimer);
+    this.preRoll = [];
+    this.queue = [];
+    this.committed = [];
+    this.sent = [];
+    this.pendingSpeechAt = [];
+    await new Promise<void>((resolve) => {
+      const timer = window.setTimeout(resolve, timeoutMs);
+      this.stopWaiters.push(() => {
+        window.clearTimeout(timer);
+        resolve();
+      });
+      socket.send(JSON.stringify({ type: 'session.stop' }));
+    });
+    if (this.socket === socket) socket.close();
   }
 }

@@ -1,4 +1,4 @@
-import type { TranscriptSegment } from '../../shared/types';
+import type { TranscriptSegment, UsageMetric } from '../../shared/types';
 import { streamText } from './apiClient';
 import type { Settings } from './settings';
 
@@ -8,6 +8,12 @@ export function needsTranslation(segment: TranscriptSegment) {
     !!segment.text.trim() &&
     (!segment.translation?.trim() || segment.translationIsFinal === false)
   );
+}
+
+export interface TranslationUsageContext {
+  meetingId: string;
+  meetingTitle: string;
+  usageSessionId?: string;
 }
 
 export class TranslationQueue {
@@ -29,7 +35,11 @@ export class TranslationQueue {
     private onError: () => void,
   ) {}
 
-  add(segment: TranscriptSegment): Promise<void> | undefined {
+  add(
+    segment: TranscriptSegment,
+    usageContext?: TranslationUsageContext,
+    onUsage?: (usage: UsageMetric) => void,
+  ): Promise<void> | undefined {
     if (this.aborted || this.jobs.has(segment.id)) return;
     const controller = new AbortController();
     this.jobs.set(segment.id, controller);
@@ -53,6 +63,11 @@ export class TranslationQueue {
             text: `Context:\n${context}\n\nCurrent speech:\n${segment.text}`,
             sourceLanguage: this.sourceLanguage,
             targetLanguage: this.targetLanguage,
+            ...(usageContext?.meetingId ? { meetingId: usageContext.meetingId } : {}),
+            ...(usageContext?.meetingTitle ? { meetingTitle: usageContext.meetingTitle } : {}),
+            ...(usageContext?.usageSessionId
+              ? { usageSessionId: usageContext.usageSessionId }
+              : {}),
           },
           (chunk) => {
             if (controller.signal.aborted) return;
@@ -60,6 +75,7 @@ export class TranslationQueue {
             void this.onUpdate(segment, translated, false, controller.signal);
           },
           controller.signal,
+          onUsage,
         );
         if (!controller.signal.aborted) {
           if (!translated.trim()) throw new Error('Empty translation');

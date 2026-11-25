@@ -1,5 +1,12 @@
+import {
+  LanguageSelect,
+  useI18n,
+  message as feedback,
+  type LocalizedMessage,
+} from '../i18n/preferences';
+import { workspaceFetch } from '../services/workspaceSession';
 import { useEffect, useMemo, useRef, useState, type HTMLAttributes } from 'react';
-import type { ProviderId } from '../../shared/types';
+import type { AuthUser, ProviderId } from '../../shared/types';
 import { suggestedModels, type ModelCapability } from '../../shared/models';
 import { headers, type Settings } from '../services/settings';
 import {
@@ -57,15 +64,18 @@ function modelsForCapability(
 
 export function SettingsDialog({
   settings,
+  user,
   onSave,
   serverHealth,
   onRefreshHealth,
 }: {
   settings: Settings;
+  user?: AuthUser | null;
   onSave: (settings: Settings) => void;
   serverHealth?: ServerHealth | null;
   onRefreshHealth?: () => void;
 }) {
+  const { t, localize } = useI18n();
   const dialog = useRef<HTMLDialogElement>(null);
   const pressedOutside = useRef(false);
   const fetchAbortRef = useRef<AbortController | null>(null);
@@ -79,7 +89,7 @@ export function SettingsDialog({
     gemini: suggestedModels.gemini.map((model) => model.id),
   });
   const [loadingProvider, setLoadingProvider] = useState<ProviderId | null>(null);
-  const [message, setMessage] = useState('');
+  const [message, setMessage] = useState<LocalizedMessage>('');
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -117,15 +127,15 @@ export function SettingsDialog({
     fetchAbortRef.current = controller;
     const label = provider === 'openai' ? 'OpenAI' : 'Gemini';
     setLoadingProvider(provider);
-    setMessage(`${label} 模型查詢中…`);
+    setMessage(feedback('{1} 模型查詢中…', label));
     setError('');
     try {
-      const response = await fetch(`/api/models?provider=${provider}`, {
+      const response = await workspaceFetch(`/api/models?provider=${provider}`, {
         headers: headers({ ...draft, provider }),
         signal: controller.signal,
       });
       if (response.status === 401 || response.status === 403) {
-        setMessage(`請檢查或填入有效的 ${label} API 金鑰。`);
+        setMessage(feedback('請檢查或填入有效的 {1} API 金鑰。', label));
         return;
       }
       if (!response.ok) throw new Error();
@@ -140,7 +150,11 @@ export function SettingsDialog({
         ],
       }));
       setMessage(
-        `找到 ${result.models.length} 個 ${label} 模型；若清單未列出所需模型，仍可直接輸入 ID。`,
+        feedback(
+          '找到 {1} 個 {2} 模型；若清單未列出所需模型，仍可直接輸入 ID。',
+          result.models.length,
+          label,
+        ),
       );
     } catch {
       if (!controller.signal.aborted) {
@@ -177,7 +191,7 @@ export function SettingsDialog({
           <strong>{title}</strong>
           <span>{description}</span>
         </div>
-        <label htmlFor={providerId}>供應商</label>
+        <label htmlFor={providerId}>{t('供應商')}</label>
         <select
           id={providerId}
           value={providerValue}
@@ -188,7 +202,7 @@ export function SettingsDialog({
           <option value="openai">OpenAI</option>
           <option value="gemini">Google Gemini</option>
         </select>
-        <label htmlFor={modelId}>模型 ID</label>
+        <label htmlFor={modelId}>{t('模型 ID')}</label>
         <input
           id={modelId}
           list={`models-${providerValue}-${capability}`}
@@ -252,7 +266,7 @@ export function SettingsDialog({
         }}
       >
         <IconSettings size={16} />
-        <span>設定</span>
+        <span>{t('設定')}</span>
       </button>
       <dialog
         ref={dialog}
@@ -292,22 +306,26 @@ export function SettingsDialog({
         >
           <div className="dialog-header">
             <div>
-              <div className="eyebrow">WORKSPACE &amp; PROVIDERS</div>
-              <h2 id="settings-title">設定與 AI 服務</h2>
+              <div className="eyebrow">{t('工作區與供應商')}</div>
+              <h2 id="settings-title">{t('設定與 AI 服務')}</h2>
             </div>
             <button
               type="button"
               className="close"
               onClick={() => void closeDialogAnimated(dialog.current)}
-              aria-label="關閉設定"
+              aria-label={t('關閉設定')}
             >
               <IconX size={18} />
             </button>
           </div>
 
           <div className="settings-section">
-            <div className="settings-section-title">外觀主題</div>
-            <div className="theme-segmented" role="group" aria-label="外觀主題">
+            <LanguageSelect />
+          </div>
+
+          <div className="settings-section">
+            <div className="settings-section-title">{t('外觀主題')}</div>
+            <div className="theme-segmented" role="group" aria-label={t('外觀主題')}>
               <button
                 type="button"
                 className={theme === 'system' ? 'active' : ''}
@@ -315,7 +333,9 @@ export function SettingsDialog({
                 onClick={() => changeTheme('system')}
               >
                 <IconLaptop size={15} />
-                <span>跟隨系統（目前{systemScheme === 'dark' ? '深色' : '淺色'}）</span>
+                <span>
+                  {t('跟隨系統（目前{1}）', systemScheme === 'dark' ? t('深色') : t('淺色'))}
+                </span>
               </button>
               <button
                 type="button"
@@ -324,7 +344,7 @@ export function SettingsDialog({
                 onClick={() => changeTheme('light')}
               >
                 <IconSun size={15} />
-                <span>淺色</span>
+                <span>{t('淺色')}</span>
               </button>
               <button
                 type="button"
@@ -333,23 +353,35 @@ export function SettingsDialog({
                 onClick={() => changeTheme('dark')}
               >
                 <IconMoon size={15} />
-                <span>深色</span>
+                <span>{t('深色')}</span>
               </button>
             </div>
           </div>
 
           <div className="settings-section">
-            <div className="settings-section-title">API 金鑰</div>
+            <div className="settings-section-title">{t('API 金鑰')}</div>
             <p className="hint">
-              金鑰留空時使用本機後端 .env 設定。預設僅保留於目前分頁，不寫入跨分頁儲存。
+              {user?.allowServerKeys === false
+                ? t(
+                    '管理員已設定此帳號僅可使用個人 BYOK 金鑰。預設僅保留於目前分頁，不寫入跨分頁儲存。',
+                  )
+                : t(
+                    '金鑰留空時使用本機後端 .env 設定（用量將記入帳號對價紀錄）。預設僅保留於目前分頁，不寫入跨分頁儲存。',
+                  )}
             </p>
             <div className="key-grid">
               <div>
                 <div className="field-label-row">
-                  <label htmlFor="openai-key">OpenAI API 金鑰</label>
+                  <label htmlFor="openai-key">{t('OpenAI API 金鑰')}</label>
                   {serverHealth?.ok && (
-                    <span className={`env-badge ${serverHealth.openai ? 'ready' : ''}`}>
-                      {serverHealth.openai ? '伺服器已設定備用金鑰' : '未設定伺服器金鑰'}
+                    <span
+                      className={`env-badge ${user?.allowServerKeys !== false && serverHealth.openai ? 'ready' : ''}`}
+                    >
+                      {user?.allowServerKeys === false
+                        ? t('僅限個人金鑰')
+                        : serverHealth.openai
+                          ? t('伺服器已設定備用金鑰')
+                          : t('未設定伺服器金鑰')}
                     </span>
                   )}
                 </div>
@@ -365,7 +397,7 @@ export function SettingsDialog({
                   <button
                     type="button"
                     className="icon-button"
-                    aria-label={showOpenAiKey ? '隱藏 OpenAI 金鑰' : '顯示 OpenAI 金鑰'}
+                    aria-label={showOpenAiKey ? t('隱藏 OpenAI 金鑰') : t('顯示 OpenAI 金鑰')}
                     onClick={() => setShowOpenAiKey((value) => !value)}
                   >
                     {showOpenAiKey ? <IconEyeOff size={16} /> : <IconEye size={16} />}
@@ -374,10 +406,16 @@ export function SettingsDialog({
               </div>
               <div>
                 <div className="field-label-row">
-                  <label htmlFor="gemini-key">Gemini API 金鑰</label>
+                  <label htmlFor="gemini-key">{t('Gemini API 金鑰')}</label>
                   {serverHealth?.ok && (
-                    <span className={`env-badge ${serverHealth.gemini ? 'ready' : ''}`}>
-                      {serverHealth.gemini ? '伺服器已設定備用金鑰' : '未設定伺服器金鑰'}
+                    <span
+                      className={`env-badge ${user?.allowServerKeys !== false && serverHealth.gemini ? 'ready' : ''}`}
+                    >
+                      {user?.allowServerKeys === false
+                        ? t('僅限個人金鑰')
+                        : serverHealth.gemini
+                          ? t('伺服器已設定備用金鑰')
+                          : t('未設定伺服器金鑰')}
                     </span>
                   )}
                 </div>
@@ -393,7 +431,7 @@ export function SettingsDialog({
                   <button
                     type="button"
                     className="icon-button"
-                    aria-label={showGeminiKey ? '隱藏 Gemini 金鑰' : '顯示 Gemini 金鑰'}
+                    aria-label={showGeminiKey ? t('隱藏 Gemini 金鑰') : t('顯示 Gemini 金鑰')}
                     onClick={() => setShowGeminiKey((value) => !value)}
                   >
                     {showGeminiKey ? <IconEyeOff size={16} /> : <IconEye size={16} />}
@@ -407,15 +445,15 @@ export function SettingsDialog({
                 checked={draft.rememberKeys}
                 onChange={(event) => setDraft({ ...draft, rememberKeys: event.target.checked })}
               />
-              <span>在這個瀏覽器記住金鑰（共用裝置請謹慎使用）</span>
+              <span>{t('在這個瀏覽器記住金鑰（共用裝置請謹慎使用）')}</span>
             </label>
           </div>
 
           <div className="settings-section">
             <div className="settings-section-head">
               <div>
-                <div className="settings-section-title">功能模型配置</div>
-                <p className="hint">可跨供應商混搭，並直接輸入或從下拉選單選取模型 ID。</p>
+                <div className="settings-section-title">{t('功能模型配置')}</div>
+                <p className="hint">{t('可跨供應商混搭，並直接輸入或從下拉選單選取模型 ID。')}</p>
               </div>
               <div className="model-fetch-group">
                 <button
@@ -425,7 +463,7 @@ export function SettingsDialog({
                   onClick={() => void findModels('openai')}
                 >
                   <IconRefresh size={14} />
-                  <span>查詢 OpenAI</span>
+                  <span>{t('查詢 OpenAI')}</span>
                 </button>
                 <button
                   type="button"
@@ -434,15 +472,15 @@ export function SettingsDialog({
                   onClick={() => void findModels('gemini')}
                 >
                   <IconRefresh size={14} />
-                  <span>查詢 Gemini</span>
+                  <span>{t('查詢 Gemini')}</span>
                 </button>
               </div>
             </div>
 
             <div className="capability-grid">
               {capabilityCard(
-                '即時轉錄',
-                '錄音同步串流',
+                t('即時轉錄'),
+                t('錄音同步串流'),
                 'live',
                 'live-provider',
                 draft.liveProvider,
@@ -452,8 +490,8 @@ export function SettingsDialog({
                 'geminiLiveModel',
               )}
               {capabilityCard(
-                '音檔轉錄',
-                '上傳檔案補轉',
+                t('音檔轉錄'),
+                t('上傳檔案補轉'),
                 'file',
                 'stt-provider',
                 draft.sttProvider,
@@ -463,8 +501,8 @@ export function SettingsDialog({
                 'geminiSttModel',
               )}
               {capabilityCard(
-                '即時雙語翻譯',
-                '雙向語境口譯',
+                t('即時雙語翻譯'),
+                t('雙向語境口譯'),
                 'translation',
                 'translation-provider',
                 draft.translationProvider,
@@ -474,8 +512,8 @@ export function SettingsDialog({
                 'geminiTranslationModel',
               )}
               {capabilityCard(
-                '會議紀錄生成',
-                '潤飾與結構化',
+                t('會議紀錄生成'),
+                t('潤飾與結構化'),
                 'minutes',
                 'provider',
                 draft.provider,
@@ -499,12 +537,12 @@ export function SettingsDialog({
 
           {message && (
             <p className="hint status-feedback" role="status">
-              {message}
+              {localize(message)}
             </p>
           )}
           {error && (
             <p className="error" role="alert">
-              {error}
+              {localize(error)}
             </p>
           )}
 
@@ -514,10 +552,10 @@ export function SettingsDialog({
               className="secondary"
               onClick={() => void closeDialogAnimated(dialog.current)}
             >
-              取消
+              {t('取消')}
             </button>
             <button className="record" type="submit">
-              儲存設定
+              {t('儲存設定')}
             </button>
           </div>
         </form>
