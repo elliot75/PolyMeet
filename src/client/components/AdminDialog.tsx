@@ -534,7 +534,12 @@ export function AdminDialog({
               <div className="admin-section">
                 <h3>{t('各帳號用量小計')}</h3>
                 {report.accounts.length > 0 ? (
-                  <div className="table-scroll">
+                  <div
+                    className="table-scroll"
+                    role="region"
+                    aria-label={t('各帳號用量小計')}
+                    tabIndex={0}
+                  >
                     <table className="usage-table">
                       <thead>
                         <tr>
@@ -599,7 +604,12 @@ export function AdminDialog({
               <div className="admin-section">
                 <h3>{t('帳號 × 日期 × 會議對價明細')}</h3>
                 {report.dailyMeetings.length > 0 ? (
-                  <div className="table-scroll">
+                  <div
+                    className="table-scroll"
+                    role="region"
+                    aria-label={t('帳號 × 日期 × 會議對價明細')}
+                    tabIndex={0}
+                  >
                     <table className="usage-table">
                       <thead>
                         <tr>
@@ -796,7 +806,7 @@ export function AdminDialog({
 
           <div className="admin-section">
             <h3>{t('帳號列表')}</h3>
-            <div className="table-scroll">
+            <div className="table-scroll" role="region" aria-label={t('帳號列表')} tabIndex={0}>
               <table className="usage-table">
                 <thead>
                   <tr>
@@ -1055,7 +1065,12 @@ export function AdminDialog({
 
           <div className="admin-section">
             <h3>{t('現行模型費率表')}</h3>
-            <div className="table-scroll">
+            <div
+              className="table-scroll"
+              role="region"
+              aria-label={t('現行模型費率表')}
+              tabIndex={0}
+            >
               <table className="usage-table">
                 <thead>
                   <tr>

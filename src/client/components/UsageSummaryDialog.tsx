@@ -133,7 +133,7 @@ export function UsageSummaryDialog({
           </div>
 
           {summary.models.length > 0 ? (
-            <div className="table-scroll">
+            <div className="table-scroll" role="region" aria-label={t('會議用量明細')} tabIndex={0}>
               <table className="usage-table">
                 <thead>
                   <tr>

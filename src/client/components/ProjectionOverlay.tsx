@@ -1,18 +1,72 @@
 import { useI18n } from '../i18n/preferences';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { TranscriptSegment } from '../../shared/types';
 import { closeDialogAnimated, openDialogModal } from '../utils/dialog';
 import { IconPresentation, IconX } from './Icons';
 
 type Layout = 'stack' | 'columns' | 'face';
+const MIN_FONT_SIZE = 16;
+const FOLLOW_DISTANCE = 24;
 
-export function ProjectionOverlay({
-  segments,
-  interim,
-}: {
+interface ProjectionCaptions {
   segments: TranscriptSegment[];
   interim: string;
-}) {
+  translating: ReadonlyMap<string, Promise<void>>;
+}
+
+export function ProjectionHistory({ segments, interim, translating }: ProjectionCaptions) {
+  const { t } = useI18n();
+  const finalized = useMemo(
+    () => segments.filter((segment) => segment.isFinal && segment.text.trim()),
+    [segments],
+  );
+  const latestId = interim ? undefined : finalized.at(-1)?.id;
+
+  return (
+    <ol className="projection-history" role="list">
+      {finalized.map((segment) => {
+        const pending = translating.has(segment.id);
+        const current = segment.id === latestId;
+        return (
+          <li
+            key={segment.id}
+            className={`projection-entry${current ? ' is-current' : ''}${pending ? ' is-translating' : ''}`}
+          >
+            <div className="projection-original">
+              {current && <span className="projection-pill">{t('最新字幕')}</span>}
+              <span>{segment.text}</span>
+            </div>
+            {(segment.translation || pending) && (
+              <div className="projection-translation">
+                {pending && <span className="projection-pill translating">{t('翻譯中…')}</span>}
+                {!pending && segment.translationIsFinal === false && (
+                  <span className="projection-pill muted">{t('未完成譯文：')}</span>
+                )}
+                {segment.translation && <span>{segment.translation}</span>}
+              </div>
+            )}
+          </li>
+        );
+      })}
+      {interim ? (
+        <li className="projection-entry is-current">
+          <div className="projection-original">
+            <span className="projection-pill">{t('辨識中')}</span>
+            <span>{interim}</span>
+          </div>
+        </li>
+      ) : (
+        finalized.length === 0 && (
+          <li className="projection-entry">
+            <div className="projection-original">{t('等待語音…')}</div>
+          </li>
+        )
+      )}
+    </ol>
+  );
+}
+
+export function ProjectionOverlay({ segments, interim, translating }: ProjectionCaptions) {
   const { t, localize } = useI18n();
   const dialog = useRef<HTMLDialogElement>(null);
   const textArea = useRef<HTMLDivElement>(null);
@@ -20,31 +74,26 @@ export function ProjectionOverlay({
   const [fullscreenError, setFullscreenError] = useState('');
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [layout, setLayout] = useState<Layout>('stack');
-  const [size, setSize] = useState(48);
+  const [size, setSize] = useState(32);
   const [visible, setVisible] = useState(true);
   const [opened, setOpened] = useState(false);
+  const [followLatest, setFollowLatest] = useState(true);
   const timer = useRef<number | undefined>(undefined);
 
-  const finalized = segments.filter((segment) => segment.isFinal);
-  const latest = finalized.at(-1);
-  const previous = finalized.at(-2);
-  let translated: TranscriptSegment | undefined;
-  for (let index = finalized.length - 1; index >= 0; index--) {
-    const segment = finalized[index];
-    if (!segment.translation?.trim()) continue;
-    translated = segment;
-    break;
-  }
-  const showEarlierTranslation = Boolean(translated && (interim || translated !== latest));
+  useLayoutEffect(() => {
+    if (opened && followLatest && textArea.current)
+      textArea.current.scrollTop = textArea.current.scrollHeight;
+  }, [opened, followLatest, segments, translating, interim, layout, size]);
 
   useEffect(() => {
-    if (opened && textArea.current) {
-      textArea.current.scrollTo({
-        top: textArea.current.scrollHeight,
-        behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
-      });
-    }
-  }, [opened, interim, latest?.text, translated?.text, translated?.translation]);
+    const reader = textArea.current;
+    if (!opened || !followLatest || !reader) return;
+    const observer = new ResizeObserver(() => {
+      reader.scrollTop = reader.scrollHeight;
+    });
+    observer.observe(reader);
+    return () => observer.disconnect();
+  }, [opened, followLatest]);
 
   const wake = () => {
     setVisible(true);
@@ -66,7 +115,7 @@ export function ProjectionOverlay({
 
   useEffect(() => {
     if (!opened) return;
-    textArea.current?.focus();
+    textArea.current?.focus({ preventScroll: true });
     wake();
     const onKey = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -81,7 +130,7 @@ export function ProjectionOverlay({
       }
       if (e.key === '-' || e.key === '_') {
         e.preventDefault();
-        setSize((n) => Math.max(n - 4, 24));
+        setSize((n) => Math.max(n - 4, MIN_FONT_SIZE));
       }
       if (e.key === 'Escape' && !document.fullscreenElement) {
         e.preventDefault();
@@ -100,15 +149,6 @@ export function ProjectionOverlay({
     };
   }, [opened]);
 
-  const contextText = showEarlierTranslation
-    ? translated?.text
-    : interim
-      ? latest?.text
-      : previous?.text;
-  const activeOriginal = interim || latest?.text || t('等待語音…');
-  const activeTranslation =
-    translated?.translation || (latest ? t('翻譯中…') : t('翻譯將顯示在這裡'));
-
   return (
     <>
       <button
@@ -116,6 +156,7 @@ export function ProjectionOverlay({
         className="secondary projection-trigger"
         onClick={() => {
           setFullscreenError('');
+          setFollowLatest(true);
           openDialogModal(dialog.current);
           setOpened(true);
         }}
@@ -140,7 +181,9 @@ export function ProjectionOverlay({
         onFocus={wake}
       >
         <div ref={surface} className="projection-surface">
-          <div className={`projection-controls ${visible ? '' : 'hidden-controls'}`}>
+          <div
+            className={`projection-controls ${visible || !followLatest ? '' : 'hidden-controls'}`}
+          >
             <div className="projection-layouts" role="group" aria-label={t('字幕版型')}>
               {(
                 [
@@ -163,7 +206,7 @@ export function ProjectionOverlay({
             <div className="projection-size-group">
               <button
                 type="button"
-                onClick={() => setSize((n) => Math.max(24, n - 4))}
+                onClick={() => setSize((n) => Math.max(MIN_FONT_SIZE, n - 4))}
                 aria-label={t('縮小字體')}
               >
                 A−
@@ -180,6 +223,17 @@ export function ProjectionOverlay({
             <button type="button" onClick={() => void fullscreen()}>
               {isFullscreen ? t('離開全螢幕') : t('全螢幕')}
             </button>
+            {!followLatest && (
+              <button
+                type="button"
+                onClick={() => {
+                  setFollowLatest(true);
+                  textArea.current?.focus({ preventScroll: true });
+                }}
+              >
+                {t('回到最新字幕')}
+              </button>
+            )}
             <button
               type="button"
               className="projection-exit"
@@ -197,25 +251,20 @@ export function ProjectionOverlay({
           </div>
           <div
             ref={textArea}
-            tabIndex={-1}
+            role="region"
+            aria-label={t('字幕紀錄')}
+            tabIndex={0}
             className={`projection-text ${layout}`}
             style={{ fontSize: `${size}px` }}
             onPointerDown={wake}
+            onScroll={(event) => {
+              const { scrollHeight, scrollTop, clientHeight } = event.currentTarget;
+              setFollowLatest(scrollHeight - scrollTop - clientHeight <= FOLLOW_DISTANCE);
+            }}
           >
-            {layout === 'stack' && contextText && (
-              <div className="projection-context">{contextText}</div>
+            {opened && (
+              <ProjectionHistory segments={segments} interim={interim} translating={translating} />
             )}
-            <div className={`projection-original ${interim ? 'is-interim' : ''}`}>
-              {interim && <span className="projection-pill">{t('辨識中')}</span>}
-              <span>{activeOriginal}</span>
-            </div>
-            {layout === 'face' && <div className="projection-divider" aria-hidden="true" />}
-            <div className={`projection-translation ${showEarlierTranslation ? 'is-stale' : ''}`}>
-              {showEarlierTranslation && (
-                <span className="projection-pill muted">{t('先前譯文')}</span>
-              )}
-              <span>{activeTranslation}</span>
-            </div>
           </div>
         </div>
       </dialog>

@@ -781,7 +781,7 @@ function WorkspaceApp({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !document.querySelector('dialog[open]')) setDrawerOpen(false);
     };
-    const narrowViewport = window.matchMedia('(max-width: 860px)');
+    const narrowViewport = window.matchMedia('(max-width: 960px)');
     const onResize = () => {
       if (!narrowViewport.matches) setDrawerOpen(false);
     };
@@ -1494,6 +1494,7 @@ function WorkspaceApp({
                   {meeting.mode === '雙語會議' && (
                     <ProjectionOverlay
                       segments={segments}
+                      translating={translating}
                       interim={Object.values(interims)
                         .map((item) => item.text)
                         .filter(Boolean)

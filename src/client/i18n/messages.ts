@@ -707,11 +707,6 @@ export const messages = {
   ],
   '等待語音…': ['等待语音…', 'Đang chờ giọng nói…', 'Waiting for speech…'],
   '翻譯中…': ['翻译中…', 'Đang dịch…', 'Translating…'],
-  翻譯將顯示在這裡: [
-    '翻译将显示在这里',
-    'Bản dịch sẽ xuất hiện ở đây',
-    'The translation will appear here',
-  ],
   投影字幕: ['投影字幕', 'Chiếu phụ đề', 'Project captions'],
   字幕版型: ['字幕版型', 'Bố cục phụ đề', 'Caption layout'],
   上下字幕: ['上下字幕', 'Trên và dưới', 'Stacked'],
@@ -728,7 +723,9 @@ export const messages = {
     'F Full screen · + / - Font size · Esc Exit',
   ],
   辨識中: ['辨识中', 'Đang chép lời', 'Transcribing'],
-  先前譯文: ['先前译文', 'Bản dịch trước đó', 'Earlier translation'],
+  字幕紀錄: ['字幕记录', 'Lịch sử phụ đề', 'Caption history'],
+  最新字幕: ['最新字幕', 'Phụ đề mới nhất', 'Latest caption'],
+  回到最新字幕: ['回到最新字幕', 'Về phụ đề mới nhất', 'Jump to latest caption'],
   '錄音中斷・已保存片段': [
     '录音中断・已保存片段',
     'Ghi âm bị gián đoạn · Có đoạn đã lưu',

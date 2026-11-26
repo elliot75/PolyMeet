@@ -307,7 +307,12 @@ export function UsageDashboardDialog({ open, onClose }: { open: boolean; onClose
                       </div>
                     </header>
 
-                    <div className="table-scroll">
+                    <div
+                      className="table-scroll"
+                      role="region"
+                      aria-label={formatBillingDate(day.usageDate, locale)}
+                      tabIndex={0}
+                    >
                       <table className="usage-table">
                         <thead>
                           <tr>
