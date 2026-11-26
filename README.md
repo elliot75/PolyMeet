@@ -2,6 +2,8 @@
 
 PolyMeet 是本機會議工作區，支援麥克風與分頁音訊錄音、即時逐字稿、雙語翻譯、音檔補轉及 AI 會議紀錄。
 
+使用者操作手冊提供繁體中文、簡體中文、越南文和英文。[Markdown](docs/polymeet-user-guide.md) · [PDF](output/pdf/polymeet-user-guide.pdf)
+
 ## 啟動
 
 需要 Node.js 22.13+（22.x）、24.x 或 26+。後端使用 Node 內建的 SQLite。

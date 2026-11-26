@@ -2,7 +2,8 @@ import { LanguageSelect, useI18n } from '../i18n/preferences';
 import { useId, useState, type FormEvent } from 'react';
 import type { AuthUser } from '../../shared/types';
 import { loginUser, setupInitialAdmin } from '../services/authClient';
-import { IconAlertCircle, IconBrandMark, IconKey, IconShield } from './Icons';
+import { IconAlertCircle, IconKey, IconShield } from './Icons';
+import { CompanyCopyright, CompanyLogo } from './CompanyBrand';
 
 export function AuthScreen({
   needsSetup,
@@ -57,9 +58,7 @@ export function AuthScreen({
       <div className="auth-card">
         <div className="auth-card-header">
           <div className="auth-brand">
-            <span className="brandmark" aria-hidden="true">
-              <IconBrandMark size={22} />
-            </span>
+            <CompanyLogo />
             <div>
               <strong>PolyMeet</strong>
               <small>{t('會議工作區')}</small>
@@ -182,6 +181,7 @@ export function AuthScreen({
             </button>
           </form>
         )}
+        <CompanyCopyright />
       </div>
     </div>
   );

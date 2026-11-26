@@ -452,6 +452,10 @@ main {
   flex-direction: column;
 }
 
+.app > main {
+  min-height: 100dvh;
+}
+
 .topbar {
   height: 62px;
   border-bottom: 1px solid var(--line);
@@ -1622,18 +1626,32 @@ dialog select {
 }
 
 /* Footer & Empty Welcome */
-.workspace footer {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.company-logo {
+  display: block;
+  flex: none;
+  width: 42px;
+  height: auto;
+}
+
+.company-copyright {
   color: var(--muted);
+  line-height: 1.5;
+  text-align: center;
+  border-top: 1px solid var(--line);
+  padding: 14px 0 0;
+}
+
+.company-copyright small {
   font-size: 12px;
-  margin-top: 36px;
+}
+
+.app > main > .company-copyright {
+  margin-top: auto;
+  padding: 14px 16px;
 }
 
 .empty {
   flex: 1;
-  min-height: calc(100dvh - 62px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2545,6 +2563,10 @@ dialog.settings-dialog {
   letter-spacing: 0.14em;
   color: var(--muted);
   font-weight: 650;
+}
+
+.auth-brand .company-logo {
+  width: 62px;
 }
 
 .auth-heading h1 {

@@ -10,6 +10,7 @@ import { ProjectionOverlay } from './components/ProjectionOverlay';
 import { DeleteMeetingDialog } from './components/DeleteMeetingDialog';
 import { LocalWorkspace } from './components/LocalWorkspace';
 import { AuthScreen } from './components/AuthScreen';
+import { CompanyCopyright, CompanyLogo } from './components/CompanyBrand';
 import { UsageSummaryDialog } from './components/UsageSummaryDialog';
 import { UsageDashboardDialog } from './components/UsageDashboardDialog';
 import { AdminDialog } from './components/AdminDialog';
@@ -1185,6 +1186,7 @@ function WorkspaceApp({
             >
               <IconMenu size={18} />
             </button>
+            <CompanyLogo />
             <div className="breadcrumbs">
               <span>{t('工作空間')}</span>
               <b>/</b>
@@ -1643,12 +1645,6 @@ function WorkspaceApp({
                 </div>
               </aside>
             </div>
-
-            <footer>
-              <span>PolyMeet</span>
-              <span aria-hidden="true">·</span>
-              <span>{t('本機優先會議工作區')}</span>
-            </footer>
           </div>
         ) : (
           <div className="empty">
@@ -1677,6 +1673,7 @@ function WorkspaceApp({
             </button>
           </div>
         )}
+        <CompanyCopyright />
       </main>
 
       <UsageSummaryDialog
@@ -1816,14 +1813,13 @@ export function App() {
       <div className="auth-screen">
         <div className="auth-card auth-loading">
           <div className="auth-brand">
-            <span className="brandmark" aria-hidden="true">
-              <IconBrandMark size={22} />
-            </span>
+            <CompanyLogo />
             <div>
               <strong>PolyMeet</strong>
               <small>{t('正在檢查登入狀態…')}</small>
             </div>
           </div>
+          <CompanyCopyright />
         </div>
       </div>
     );
