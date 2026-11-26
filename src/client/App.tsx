@@ -208,6 +208,7 @@ function WorkspaceApp({
   const [serverHealth, setServerHealth] = useState<ServerHealth | null>(initialHealth);
   const [currency, setCurrency] = useState<CurrencySettings>({ currencyCode: '', exchangeRate: 0 });
   const [meetingUsage, setMeetingUsage] = useState<UsageSessionSummary | null>(null);
+  const meetingUsageRequest = useRef(0);
   const [summaryModal, setSummaryModal] = useState<{
     summary: UsageSessionSummary;
     mode: 'session' | 'meeting';
@@ -284,9 +285,13 @@ function WorkspaceApp({
   }, []);
 
   const refreshMeetingUsage = useCallback(async (meetingId: string) => {
+    if (selectedRef.current !== meetingId) return;
+    const request = ++meetingUsageRequest.current;
     try {
       const { summary } = await fetchMeetingUsage(meetingId);
-      if (selectedRef.current === meetingId) setMeetingUsage(summary);
+      if (meetingUsageRequest.current === request && selectedRef.current === meetingId) {
+        setMeetingUsage(summary);
+      }
     } catch {
       // Ignore transient meeting usage fetch errors.
     }
@@ -428,9 +433,13 @@ function WorkspaceApp({
             },
           );
         },
-        () => {
-          if (selectedRef.current === selected)
-            setTranslationStatus('翻譯失敗，請檢查翻譯模型和金鑰。');
+        (reason) => {
+          if (selectedRef.current !== selected || translationQueueRef.current !== queue) return;
+          setTranslationStatus(
+            reason === 'first-text-timeout'
+              ? '即時翻譯逾時。錄音結束後可補齊未譯段落。'
+              : '翻譯失敗，請檢查翻譯模型和金鑰。',
+          );
         },
       ));
       const recordingUsageSessionId = activeRecordingUsageSessionRef.current;
@@ -457,6 +466,7 @@ function WorkspaceApp({
             meetingId: segment.meetingId,
             meetingTitle: meetingTitleRef.current,
             usageSessionId: recordingUsageSessionId ?? batch?.id,
+            live: Boolean(recordingUsageSessionId),
           },
           () => {
             if (batch) batch.recordedCount += 1;

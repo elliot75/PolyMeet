@@ -1,5 +1,5 @@
 import OpenAI from 'openai';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, type FinishReason } from '@google/genai';
 import type { ProviderId } from '../../shared/types';
 
 export interface ProviderTextUsage {
@@ -13,6 +13,7 @@ export async function* generateText(
   provider: ProviderId,
   key: string,
   model: string,
+  operation: 'translate' | 'minutes',
   instruction: string,
   input: string,
   signal?: AbortSignal,
@@ -28,6 +29,10 @@ export async function* generateText(
         input,
         stream: true,
         store: false,
+        ...(operation === 'translate' &&
+        /^gpt-5(?:-(?:mini|nano))?(?:-\d{4}-\d{2}-\d{2})?$/.test(model)
+          ? { reasoning: { effort: 'minimal' } }
+          : {}),
       },
       { signal },
     );
@@ -77,7 +82,13 @@ export async function* generateText(
     const stream = await client.models.generateContentStream({
       model,
       contents: input,
-      config: { systemInstruction: instruction, abortSignal: signal },
+      config: {
+        systemInstruction: instruction,
+        abortSignal: signal,
+        ...(operation === 'translate' && /^(?:models\/)?gemini-3\.8-flash$/.test(model)
+          ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+          : {}),
+      },
     });
     let latestUsage:
       | {
@@ -88,9 +99,11 @@ export async function* generateText(
           totalTokenCount?: number;
         }
       | undefined;
+    let finishReason: FinishReason | undefined;
     for await (const chunk of stream) {
       if (chunk.responseId) onReference?.(chunk.responseId);
       if (chunk.usageMetadata) latestUsage = chunk.usageMetadata;
+      finishReason = chunk.candidates?.[0]?.finishReason ?? finishReason;
       if (chunk.text) yield chunk.text;
     }
     if (latestUsage) {
@@ -105,5 +118,6 @@ export async function* generateText(
         totalTokens: Number(latestUsage.totalTokenCount) || inputTokens + outputTokens,
       });
     }
+    if (finishReason !== 'STOP') throw new Error('Gemini response did not complete');
   }
 }

@@ -448,6 +448,7 @@ app.post(
       let reference: string | undefined;
       let providerRejected = false;
       let failed = false;
+      let finalText: string | undefined;
       const clientGone = () => controller.signal.aborted || stream.aborted || stream.closed;
       try {
         const convert = scriptConverter(selectedLanguages);
@@ -465,6 +466,7 @@ app.post(
           provider,
           resolved.key,
           model,
+          operation,
           instruction,
           input,
           upstreamSignal,
@@ -477,13 +479,23 @@ app.post(
             if (usageId) saveUsageProviderReference(usageId, id);
           },
         );
-        const output = convert ? streamConvertedText(chunks, convert, operation) : chunks;
+        // Stream the draft immediately and normalize the complete text after generation.
+        const correctDraft =
+          operation === 'translate' && data.streamDraft === '1' ? convert : undefined;
+        const output =
+          convert && !correctDraft ? streamConvertedText(chunks, convert, operation) : chunks;
+        let draft = '';
         for await (const value of output) {
           if (value && !clientGone()) {
+            if (correctDraft) draft += value;
             await enqueueWrite(() =>
               stream.writeSSE({ event: 'delta', data: JSON.stringify({ text: value }) }),
             ).catch(() => controller.abort());
           }
+        }
+        if (correctDraft && !clientGone()) {
+          const corrected = correctDraft(draft);
+          if (corrected !== draft) finalText = corrected;
         }
       } catch (error) {
         failed = true;
@@ -519,10 +531,13 @@ app.post(
       if (failed) {
         await stream.writeSSE({
           event: 'error',
-          data: JSON.stringify({ error: 'provider_request_failed' }),
+          data: JSON.stringify({ error: 'provider_request_failed', usage: recorded }),
         });
       } else {
-        await stream.writeSSE({ event: 'done', data: JSON.stringify({ usage: recorded }) });
+        await stream.writeSSE({
+          event: 'done',
+          data: JSON.stringify({ usage: recorded, finalText }),
+        });
       }
     });
   },

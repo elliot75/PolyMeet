@@ -11,6 +11,7 @@ const mocked = vi.hoisted(() => ({
   geminiModels: vi.fn(),
 }));
 vi.mock('@google/genai', () => ({
+  ThinkingLevel: { LOW: 'LOW' },
   GoogleGenAI: class {
     files = { upload: mocked.upload, get: mocked.get, delete: mocked.remove };
     models = {
@@ -345,7 +346,128 @@ describe('provider routes with simulated services', () => {
       expect.objectContaining({ store: false }),
       expect.anything(),
     );
+    expect(mocked.openaiResponse.mock.calls[0][0]).not.toHaveProperty('reasoning');
   });
+
+  it('streams a translation draft before completion and returns corrected Chinese with usage', async () => {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    mocked.openaiResponse.mockResolvedValueOnce(
+      (async function* () {
+        yield { type: 'response.output_text.delta', delta: '会议' };
+        await promise;
+        yield { type: 'response.output_text.delta', delta: '记录' };
+        yield {
+          type: 'response.completed',
+          response: { usage: { input_tokens: 10, output_tokens: 4 } },
+        };
+      })(),
+    );
+    const response = await app.request('/api/translate/stream', {
+      method: 'POST',
+      headers: {
+        'x-openai-api-key': 'test-key',
+        'content-type': 'application/json',
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        provider: 'openai',
+        model: 'gpt-5-mini',
+        text: 'Meeting minutes',
+        sourceLanguage: 'English',
+        targetLanguage: '繁體中文',
+        streamDraft: '1',
+      }),
+    });
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    try {
+      const first = await reader.read();
+      expect(decoder.decode(first.value)).toContain('{"text":"会议"}');
+    } finally {
+      resolve();
+    }
+    let rest = '';
+    for (;;) {
+      const frame = await reader.read();
+      if (frame.done) break;
+      rest += decoder.decode(frame.value, { stream: true });
+    }
+    expect(rest).toContain('"finalText":"會議記錄"');
+    expect(rest).toContain('"totalTokens":14');
+    expect(mocked.openaiResponse).toHaveBeenCalledWith(
+      expect.objectContaining({ reasoning: { effort: 'minimal' } }),
+      expect.anything(),
+    );
+  });
+
+  it('uses a lower thinking level for Gemini 3.8 Flash translation', async () => {
+    mocked.generateStream.mockResolvedValueOnce(
+      (async function* () {
+        yield { text: 'Meeting minutes', candidates: [{ finishReason: 'STOP' }] };
+      })(),
+    );
+    const response = await app.request('/api/translate/stream', {
+      method: 'POST',
+      headers: {
+        'x-gemini-api-key': 'test-key',
+        'content-type': 'application/json',
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        provider: 'gemini',
+        model: 'gemini-3.8-flash',
+        text: '會議記錄',
+        targetLanguage: 'English',
+      }),
+    });
+    expect(await response.text()).toContain('Meeting minutes');
+    expect(mocked.generateStream).toHaveBeenCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({ thinkingConfig: { thinkingLevel: 'LOW' } }),
+      }),
+    );
+  });
+
+  it.each(['MAX_TOKENS', 'SAFETY', undefined])(
+    'leaves incomplete Gemini text unfinished and records reported usage (%s)',
+    async (finishReason) => {
+      mocked.generateStream.mockResolvedValueOnce(
+        (async function* () {
+          yield {
+            text: '开会地点是',
+            candidates: [{ finishReason }],
+            responseId: 'gemini-fixture',
+          };
+          yield {
+            usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 4, totalTokenCount: 24 },
+          };
+        })(),
+      );
+      const response = await app.request('/api/translate/stream', {
+        method: 'POST',
+        headers: {
+          'x-gemini-api-key': 'test-key',
+          'content-type': 'application/json',
+          Cookie: cookie,
+        },
+        body: JSON.stringify({
+          provider: 'gemini',
+          model: 'gemini-3.8-flash',
+          text: 'The meeting is at the school.',
+          sourceLanguage: 'English',
+          targetLanguage: '繁體中文',
+          streamDraft: '1',
+        }),
+      });
+      const frames = await response.text();
+      expect(frames).toContain('event: delta');
+      expect(frames).toContain('开会地点是');
+      expect(frames).toContain('event: error');
+      expect(frames).not.toContain('event: done');
+      expect(frames).toContain('"totalTokens":24');
+      expect(queryUsageReport({}).totals).toMatchObject({ totalTokens: 24, pendingCalls: 0 });
+    },
+  );
 
   it.each(['response.incomplete', 'response.failed', undefined])(
     'reports OpenAI generation without successful completion (%s)',

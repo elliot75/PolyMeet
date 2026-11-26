@@ -28,6 +28,14 @@ export function ProjectionOverlay({
   const finalized = segments.filter((segment) => segment.isFinal);
   const latest = finalized.at(-1);
   const previous = finalized.at(-2);
+  let translated: TranscriptSegment | undefined;
+  for (let index = finalized.length - 1; index >= 0; index--) {
+    const segment = finalized[index];
+    if (!segment.translation?.trim()) continue;
+    translated = segment;
+    break;
+  }
+  const showEarlierTranslation = Boolean(translated && (interim || translated !== latest));
 
   useEffect(() => {
     if (opened && textArea.current) {
@@ -36,7 +44,7 @@ export function ProjectionOverlay({
         behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
       });
     }
-  }, [opened, interim, latest?.text, latest?.translation]);
+  }, [opened, interim, latest?.text, translated?.text, translated?.translation]);
 
   const wake = () => {
     setVisible(true);
@@ -92,9 +100,14 @@ export function ProjectionOverlay({
     };
   }, [opened]);
 
-  const contextText = interim ? latest?.text : previous?.text;
+  const contextText = showEarlierTranslation
+    ? translated?.text
+    : interim
+      ? latest?.text
+      : previous?.text;
   const activeOriginal = interim || latest?.text || t('等待語音…');
-  const activeTranslation = latest?.translation || (latest ? t('翻譯中…') : t('翻譯將顯示在這裡'));
+  const activeTranslation =
+    translated?.translation || (latest ? t('翻譯中…') : t('翻譯將顯示在這裡'));
 
   return (
     <>
@@ -197,9 +210,9 @@ export function ProjectionOverlay({
               <span>{activeOriginal}</span>
             </div>
             {layout === 'face' && <div className="projection-divider" aria-hidden="true" />}
-            <div className={`projection-translation ${interim ? 'is-stale' : ''}`}>
-              {interim && latest?.translation && (
-                <span className="projection-pill muted">{t('上一句譯文')}</span>
+            <div className={`projection-translation ${showEarlierTranslation ? 'is-stale' : ''}`}>
+              {showEarlierTranslation && (
+                <span className="projection-pill muted">{t('先前譯文')}</span>
               )}
               <span>{activeTranslation}</span>
             </div>

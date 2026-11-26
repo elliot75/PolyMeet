@@ -34,6 +34,7 @@ export async function streamText(
   const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
   let buffer = '',
     doneEvent = false;
+  let finalText: string | undefined;
   try {
     while (true) {
       const chunk = await reader.read();
@@ -54,17 +55,18 @@ export async function streamText(
           .filter((line) => line.startsWith('data:'))
           .map((line) => line.slice(5).trimStart())
           .join('\n');
-        if (event === 'error') throw new Error('AI 服務無法完成請求，請檢查金鑰及模型設定。');
-        if (event === 'done') {
-          doneEvent = true;
+        if (event === 'done' || event === 'error') {
           if (data) {
             try {
               const parsed = JSON.parse(data);
+              if (typeof parsed?.finalText === 'string') finalText = parsed.finalText;
               if (parsed?.usage) onUsage?.(parsed.usage as UsageMetric);
             } catch {
               // Ignore malformed usage payload on completion.
             }
           }
+          if (event === 'error') throw new Error('AI 服務無法完成請求，請檢查金鑰及模型設定。');
+          doneEvent = true;
         }
         if (event === 'delta') {
           const parsed = JSON.parse(data);
@@ -73,6 +75,7 @@ export async function streamText(
       }
     }
     if (!doneEvent) throw new Error('連線中斷，請重試。');
+    return finalText;
   } catch (error) {
     await reader.cancel().catch(() => {});
     throw error;

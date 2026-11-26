@@ -15,6 +15,11 @@ export const messages = {
     'Không thể lưu bản dịch. Hãy kiểm tra bộ nhớ trình duyệt.',
     'Could not save the translation. Check your browser storage.',
   ],
+  '即時翻譯逾時。錄音結束後可補齊未譯段落。': [
+    '实时翻译超时。录音结束后可补译未翻译的段落。',
+    'Dịch trực tiếp đã hết thời gian chờ. Bạn có thể dịch các đoạn còn thiếu sau khi ghi âm.',
+    'Live translation timed out. Translate missing segments after recording.',
+  ],
   '翻譯失敗，請檢查翻譯模型和金鑰。': [
     '翻译失败，请检查翻译模型和密钥。',
     'Dịch thất bại. Hãy kiểm tra mô hình và khóa API.',
@@ -723,7 +728,7 @@ export const messages = {
     'F Full screen · + / - Font size · Esc Exit',
   ],
   辨識中: ['辨识中', 'Đang chép lời', 'Transcribing'],
-  上一句譯文: ['上一句译文', 'Bản dịch câu trước', 'Previous translation'],
+  先前譯文: ['先前译文', 'Bản dịch trước đó', 'Earlier translation'],
   '錄音中斷・已保存片段': [
     '录音中断・已保存片段',
     'Ghi âm bị gián đoạn · Có đoạn đã lưu',
