@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { WORKSPACE_ACCOUNT_HEADER, WORKSPACE_SESSION_HEADER } from '../shared/protocol';
+import { gpt6LunaModel, lunaReasoningEfforts } from '../shared/models';
 import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { bodyLimit } from 'hono/body-limit';
@@ -376,10 +377,19 @@ app.post(
         !['standard', 'action_items', 'detailed'].includes(String(data.style)))
     )
       return c.json({ error: 'invalid_request' }, 400);
+    const model = data.model.trim();
+    const reasoningEffort = lunaReasoningEfforts.find((effort) => effort === data.reasoningEffort);
+    if (
+      data.reasoningEffort !== undefined &&
+      (operation !== 'translate' ||
+        data.provider !== 'openai' ||
+        model !== gpt6LunaModel ||
+        !reasoningEffort)
+    )
+      return c.json({ error: 'invalid_request' }, 400);
     const resolved = resolveProviderKey(c, data.provider, user);
     if (!resolved) return c.json({ error: 'missing_api_key' }, 401);
 
-    const model = data.model.trim();
     const meetingId = parseOptionalString(data.meetingId, 120);
     const meetingTitle = parseOptionalString(data.meetingTitle, 200);
     const usageSessionId = parseOptionalString(data.usageSessionId, 120);
@@ -478,6 +488,7 @@ app.post(
             reference = id;
             if (usageId) saveUsageProviderReference(usageId, id);
           },
+          reasoningEffort,
         );
         // Stream the draft immediately and normalize the complete text after generation.
         const correctDraft =

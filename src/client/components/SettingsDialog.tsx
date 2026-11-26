@@ -7,7 +7,13 @@ import {
 import { workspaceFetch } from '../services/workspaceSession';
 import { useEffect, useMemo, useRef, useState, type HTMLAttributes } from 'react';
 import type { AuthUser, ProviderId } from '../../shared/types';
-import { suggestedModels, type ModelCapability } from '../../shared/models';
+import {
+  gpt6LunaModel,
+  lunaReasoningEfforts,
+  suggestedModels,
+  type LunaReasoningEffort,
+  type ModelCapability,
+} from '../../shared/models';
 import { headers, type Settings } from '../services/settings';
 import {
   applyThemePreference,
@@ -45,6 +51,14 @@ type ModelKey =
   | 'geminiTranslationModel';
 
 const CAPABILITIES: readonly ModelCapability[] = ['live', 'file', 'translation', 'minutes'];
+const REASONING_LABELS = {
+  none: '不推理',
+  low: '低',
+  medium: '中',
+  high: '高',
+  xhigh: '極高',
+  max: '最高',
+} as const satisfies Record<LunaReasoningEffort, string>;
 
 function modelsForCapability(
   provider: ProviderId,
@@ -210,6 +224,33 @@ export function SettingsDialog({
           value={draft[activeModelKey]}
           onChange={(event) => setDraft({ ...draft, [activeModelKey]: event.target.value })}
         />
+        {capability === 'translation' &&
+          providerValue === 'openai' &&
+          draft[activeModelKey].trim() === gpt6LunaModel && (
+            <div className="setting-card-reasoning">
+              <label htmlFor="translation-reasoning-effort">{t('思考強度')}</label>
+              <select
+                id="translation-reasoning-effort"
+                name="reasoningEffort"
+                value={draft.openaiTranslationReasoningEffort}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setDraft({
+                    ...draft,
+                    openaiTranslationReasoningEffort:
+                      lunaReasoningEfforts.find((effort) => effort === value) ?? '',
+                  });
+                }}
+              >
+                <option value="">{t('模型預設')}</option>
+                {lunaReasoningEfforts.map((effort) => (
+                  <option key={effort} value={effort}>
+                    {t(REASONING_LABELS[effort])}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
       </div>
     );
   }

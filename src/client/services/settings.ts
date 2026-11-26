@@ -1,5 +1,5 @@
 import type { ProviderId } from '../../shared/types';
-import { defaultModels } from '../../shared/models';
+import { defaultModels, type LunaReasoningEffort } from '../../shared/models';
 export interface Settings {
   provider: ProviderId;
   openaiModel: string;
@@ -14,6 +14,7 @@ export interface Settings {
   geminiLiveModel: string;
   translationProvider: ProviderId;
   openaiTranslationModel: string;
+  openaiTranslationReasoningEffort: LunaReasoningEffort | '';
   geminiTranslationModel: string;
   rememberKeys: boolean;
 }
@@ -31,6 +32,7 @@ export const defaults: Settings = {
   geminiLiveModel: defaultModels.gemini.live,
   translationProvider: 'openai',
   openaiTranslationModel: defaultModels.openai.translation,
+  openaiTranslationReasoningEffort: '',
   geminiTranslationModel: defaultModels.gemini.translation,
   rememberKeys: false,
 };

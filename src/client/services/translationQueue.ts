@@ -1,4 +1,5 @@
 import type { TranscriptSegment, UsageMetric } from '../../shared/types';
+import { gpt6LunaModel } from '../../shared/models';
 import { streamText } from './apiClient';
 import type { Settings } from './settings';
 
@@ -83,6 +84,10 @@ export class TranslationQueue {
       openaiModel: this.settings.openaiTranslationModel,
       geminiModel: this.settings.geminiTranslationModel,
     };
+    const reasoningEffort =
+      options.provider === 'openai' && options.openaiModel === gpt6LunaModel
+        ? this.settings.openaiTranslationReasoningEffort
+        : '';
     let firstTextTimer = usageContext?.live
       ? setTimeout(() => {
           controller.abort(
@@ -99,6 +104,7 @@ export class TranslationQueue {
           sourceLanguage: this.sourceLanguage,
           targetLanguage: this.targetLanguage,
           streamDraft: '1',
+          ...(reasoningEffort ? { reasoningEffort } : {}),
           ...(usageContext?.meetingId ? { meetingId: usageContext.meetingId } : {}),
           ...(usageContext?.meetingTitle ? { meetingTitle: usageContext.meetingTitle } : {}),
           ...(usageContext?.usageSessionId ? { usageSessionId: usageContext.usageSessionId } : {}),

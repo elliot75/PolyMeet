@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import { GoogleGenAI, ThinkingLevel, type FinishReason } from '@google/genai';
 import type { ProviderId } from '../../shared/types';
+import type { LunaReasoningEffort } from '../../shared/models';
 
 export interface ProviderTextUsage {
   inputTokens: number;
@@ -19,6 +20,7 @@ export async function* generateText(
   signal?: AbortSignal,
   onUsage?: (usage: ProviderTextUsage) => void,
   onReference?: (id: string) => void,
+  reasoningEffort?: LunaReasoningEffort,
 ): AsyncGenerator<string> {
   if (provider === 'openai') {
     const client = new OpenAI({ apiKey: key });
@@ -33,6 +35,7 @@ export async function* generateText(
         /^gpt-5(?:-(?:mini|nano))?(?:-\d{4}-\d{2}-\d{2})?$/.test(model)
           ? { reasoning: { effort: 'minimal' } }
           : {}),
+        ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}),
       },
       { signal },
     );

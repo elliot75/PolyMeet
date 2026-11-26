@@ -400,6 +400,58 @@ describe('provider routes with simulated services', () => {
     );
   });
 
+  it.each(['none', 'low', undefined] as const)(
+    'passes the selected GPT-6 Luna translation effort (%s)',
+    async (reasoningEffort) => {
+      mocked.openaiResponse.mockResolvedValueOnce(
+        (async function* () {
+          yield { type: 'response.output_text.delta', delta: 'Meeting minutes' };
+          yield { type: 'response.completed' };
+        })(),
+      );
+      const response = await app.request('/api/translate/stream', {
+        method: 'POST',
+        headers: {
+          'x-openai-api-key': 'test-key',
+          'content-type': 'application/json',
+          Cookie: cookie,
+        },
+        body: JSON.stringify({
+          provider: 'openai',
+          model: 'gpt-6-luna',
+          text: '會議記錄',
+          targetLanguage: 'English',
+          reasoningEffort,
+        }),
+      });
+      expect(await response.text()).toContain('event: done');
+      const request = mocked.openaiResponse.mock.calls[0][0];
+      if (reasoningEffort) expect(request.reasoning).toEqual({ effort: reasoningEffort });
+      else expect(request).not.toHaveProperty('reasoning');
+    },
+  );
+
+  it.each([
+    ['translate', 'gpt-6-luna', 'minimal'],
+    ['translate', 'gpt-5-mini', 'low'],
+    ['minutes', 'gpt-6-luna', 'low'],
+  ])('rejects unsupported reasoning settings (%s, %s, %s)', async (operation, model, effort) => {
+    const response = await app.request(`/api/${operation}/stream`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({
+        provider: 'openai',
+        model,
+        text: '會議記錄',
+        targetLanguage: 'English',
+        reasoningEffort: effort,
+        ...(operation === 'minutes' ? { action: 'polish', style: 'standard' } : {}),
+      }),
+    });
+    expect(response.status).toBe(400);
+    expect(mocked.openaiResponse).not.toHaveBeenCalled();
+  });
+
   it('uses a lower thinking level for Gemini 3.8 Flash translation', async () => {
     mocked.generateStream.mockResolvedValueOnce(
       (async function* () {

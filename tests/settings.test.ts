@@ -36,4 +36,14 @@ describe('settings persistence', () => {
     saveSettings({ ...loadSettings(), rememberKeys: false });
     expect(localStorage.getItem('polymeet-settings')).not.toContain('test-key');
   });
+  it('uses the model default for older settings and persists an explicit Luna choice', () => {
+    localStorage.setItem(
+      'polymeet-settings',
+      JSON.stringify({ openaiTranslationModel: 'gpt-6-luna' }),
+    );
+    expect(loadSettings().openaiTranslationReasoningEffort).toBe('');
+    saveSettings({ ...loadSettings(), openaiTranslationReasoningEffort: 'low' });
+    sessionStorage.clear();
+    expect(loadSettings().openaiTranslationReasoningEffort).toBe('low');
+  });
 });

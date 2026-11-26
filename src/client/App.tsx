@@ -357,6 +357,7 @@ function WorkspaceApp({
         settings.translationProvider === 'openai'
           ? translationModel
           : defaults.openaiTranslationModel,
+      openaiTranslationReasoningEffort: settings.openaiTranslationReasoningEffort,
       geminiTranslationModel:
         settings.translationProvider === 'gemini'
           ? translationModel
@@ -364,7 +365,12 @@ function WorkspaceApp({
       openaiKey: settings.translationProvider === 'openai' ? translationKey : '',
       geminiKey: settings.translationProvider === 'gemini' ? translationKey : '',
     }),
-    [settings.translationProvider, translationModel, translationKey],
+    [
+      settings.translationProvider,
+      settings.openaiTranslationReasoningEffort,
+      translationModel,
+      translationKey,
+    ],
   );
 
   useEffect(() => {

@@ -71,6 +71,35 @@ describe('translation queue', () => {
     ]);
   });
 
+  it.each([
+    ['openai', 'gpt-6-luna', 'low', 'low'],
+    ['openai', 'gpt-6-luna', '', undefined],
+    ['openai', 'gpt-5-mini', 'low', undefined],
+    ['gemini', 'gpt-6-luna', 'low', undefined],
+  ] as const)(
+    'sends the selected reasoning effort only for OpenAI Luna (%s, %s, %s)',
+    async (provider, model, effort, expected) => {
+      const fetchMock = vi.fn(async (_url: string, _init: RequestInit) =>
+        sseResponse(['event: delta\ndata: {"text":"ok"}\n\n', 'event: done\ndata: {}\n\n']),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+      const queue = new TranslationQueue(
+        {
+          ...defaults,
+          translationProvider: provider,
+          openaiTranslationModel: model,
+          openaiTranslationReasoningEffort: effort,
+        },
+        '繁體中文',
+        'English',
+        vi.fn(),
+        vi.fn(),
+      );
+      await queue.add(makeSegment('s1', '會議記錄'));
+      expect(JSON.parse(String(fetchMock.mock.calls[0][1].body)).reasoningEffort).toBe(expected);
+    },
+  );
+
   it('runs two jobs concurrently and retains the recording id while the next action waits', async () => {
     const usageIds: string[] = [];
     const { promise, resolve } = Promise.withResolvers<void>();

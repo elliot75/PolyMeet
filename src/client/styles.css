@@ -2037,17 +2037,17 @@ dialog.settings-dialog {
   margin-bottom: 3px;
 }
 
-.setting-card label:first-of-type {
+.setting-card > label:first-of-type {
   grid-column: 1;
   grid-row: 2;
 }
 
-.setting-card select {
+.setting-card > select {
   grid-column: 1;
   grid-row: 3;
 }
 
-.setting-card label:last-of-type {
+.setting-card > label:last-of-type {
   grid-column: 2;
   grid-row: 2;
 }
@@ -2055,6 +2055,18 @@ dialog.settings-dialog {
 .setting-card input {
   grid-column: 2;
   grid-row: 3;
+}
+
+.setting-card-reasoning {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+.setting-card-reasoning select {
+  min-height: 48px;
+  font-size: max(1rem, 1em);
 }
 
 .setting-card-head strong {
