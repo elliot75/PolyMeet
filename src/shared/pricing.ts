@@ -1,3 +1,4 @@
+import { gpt6LunaModel } from './models';
 import type {
   CurrencySettings,
   KeySource,
@@ -6,11 +7,23 @@ import type {
   UsageOperation,
 } from './types';
 
+// Standard API rates (USD), checked November 26, 2026.
+// https://developers.openai.com/api/docs/pricing
+// https://aistudio.google.com/docs/pricing
 export const DEFAULT_MODEL_PRICING: readonly ModelPricing[] = [
   // OpenAI transcription & realtime
   {
     provider: 'openai',
     model: 'gpt-live-transcribe',
+    inputPer1M: 0,
+    audioInputPer1M: 0,
+    cachedInputPer1M: 0,
+    outputPer1M: 0,
+    perMinute: 0.017,
+  },
+  {
+    provider: 'openai',
+    model: 'gpt-realtime-whisper',
     inputPer1M: 0,
     audioInputPer1M: 0,
     cachedInputPer1M: 0,
@@ -63,6 +76,17 @@ export const DEFAULT_MODEL_PRICING: readonly ModelPricing[] = [
     perMinute: 0.006,
   },
   // OpenAI text / reasoning
+  {
+    provider: 'openai',
+    model: gpt6LunaModel,
+    inputPer1M: 0.1,
+    audioInputPer1M: 0,
+    cachedInputPer1M: 0.01,
+    cacheWritePer1M: 0.125,
+    longContextThreshold: 272_000,
+    outputPer1M: 0.5,
+    perMinute: 0,
+  },
   {
     provider: 'openai',
     model: 'gpt-5',
@@ -130,9 +154,9 @@ export const DEFAULT_MODEL_PRICING: readonly ModelPricing[] = [
   {
     provider: 'gemini',
     model: 'gemini-3.5-transcribe-live',
-    inputPer1M: 0.5,
+    inputPer1M: 0,
     audioInputPer1M: 3.5,
-    cachedInputPer1M: 0.125,
+    cachedInputPer1M: 0,
     outputPer1M: 21,
     perMinute: 0.009,
   },
@@ -150,7 +174,7 @@ export const DEFAULT_MODEL_PRICING: readonly ModelPricing[] = [
     model: 'gemini-3.5-flash-lite',
     inputPer1M: 0.3,
     audioInputPer1M: 0.3,
-    cachedInputPer1M: 0.075,
+    cachedInputPer1M: 0.03,
     outputPer1M: 2.5,
     perMinute: 0,
   },
@@ -159,7 +183,8 @@ export const DEFAULT_MODEL_PRICING: readonly ModelPricing[] = [
     model: 'gemini-2.5-flash',
     inputPer1M: 0.3,
     audioInputPer1M: 1.0,
-    cachedInputPer1M: 0.075,
+    cachedInputPer1M: 0.03,
+    cachedAudioInputPer1M: 0.1,
     outputPer1M: 2.5,
     perMinute: 0,
   },
@@ -168,7 +193,8 @@ export const DEFAULT_MODEL_PRICING: readonly ModelPricing[] = [
     model: 'gemini-2.5-flash-lite',
     inputPer1M: 0.1,
     audioInputPer1M: 0.3,
-    cachedInputPer1M: 0.025,
+    cachedInputPer1M: 0.01,
+    cachedAudioInputPer1M: 0.03,
     outputPer1M: 0.4,
     perMinute: 0,
   },
@@ -177,37 +203,42 @@ export const DEFAULT_MODEL_PRICING: readonly ModelPricing[] = [
     model: 'gemini-2.5-pro',
     inputPer1M: 1.25,
     audioInputPer1M: 1.25,
-    cachedInputPer1M: 0.3125,
+    cachedInputPer1M: 0.125,
+    longContextThreshold: 200_000,
     outputPer1M: 10,
-    perMinute: 0,
-  },
-  {
-    provider: 'gemini',
-    model: 'gemini-2.0-flash',
-    inputPer1M: 0.1,
-    audioInputPer1M: 0.7,
-    cachedInputPer1M: 0.025,
-    outputPer1M: 0.4,
     perMinute: 0,
   },
 ];
 
-// Google publishes the standard-rate transition at the start of 2027.
+const geminiModelRedirects = new Map([
+  ['gemini-2.5-flash', 'gemini-3.5-flash-lite'],
+  ['gemini-2.5-pro', 'gemini-3.8-flash'],
+]);
+
 export function builtinPricingAt(row: ModelPricing, timestamp: number): ModelPricing {
+  // Google bills redirected requests at the target model's rates.
+  const rateModel =
+    row.provider === 'gemini' && timestamp >= Date.UTC(2026, 11, 1)
+      ? (geminiModelRedirects.get(row.model) ?? row.model)
+      : row.model;
+  const rate = DEFAULT_MODEL_PRICING.find(
+    (item) => item.provider === row.provider && item.model === rateModel,
+  );
+  const current = rate ? { ...rate, model: row.model, updatedAt: row.updatedAt } : row;
   if (
-    row.provider !== 'gemini' ||
-    row.model !== 'gemini-3.8-flash' ||
-    timestamp < Date.UTC(2027, 0, 1)
+    rateModel === 'gemini-3.8-flash' &&
+    row.provider === 'gemini' &&
+    timestamp >= Date.UTC(2027, 0, 1)
   ) {
-    return row;
+    return {
+      ...current,
+      inputPer1M: 1.5,
+      audioInputPer1M: 1.5,
+      cachedInputPer1M: 0.15,
+      outputPer1M: 7.5,
+    };
   }
-  return {
-    ...row,
-    inputPer1M: 1.5,
-    audioInputPer1M: 1.5,
-    cachedInputPer1M: 0.15,
-    outputPer1M: 7.5,
-  };
+  return current;
 }
 
 export function normalizeModelKey(model: string): string {
@@ -237,6 +268,9 @@ export function calculateUsageCost(
     textInputTokens: number;
     audioInputTokens: number;
     cachedInputTokens: number;
+    cachedAudioInputTokens?: number;
+    cacheWriteTokens?: number;
+    cacheWrite12hTokens?: number;
     outputTokens: number;
     audioSeconds: number;
     operation: UsageOperation;
@@ -254,19 +288,32 @@ export function calculateUsageCost(
       pricing.audioInputPer1M > 0 ? pricing.audioInputPer1M : pricing.inputPer1M;
     const effectiveCachedRate =
       pricing.cachedInputPer1M > 0 ? pricing.cachedInputPer1M : pricing.inputPer1M;
+    const effectiveCachedAudioRate =
+      pricing.cachedAudioInputPer1M ??
+      (pricing.cachedInputPer1M > 0 ? pricing.cachedInputPer1M : effectiveAudioRate);
     const cached = Math.max(0, Math.min(usage.cachedInputTokens, totalInputTokens));
-    const cachedText = Math.min(cached, usage.textInputTokens);
-    const cachedAudio = Math.max(0, cached - cachedText);
-    const nonCachedText = Math.max(0, usage.textInputTokens - cachedText);
-    const nonCachedAudio = Math.max(0, usage.audioInputTokens - cachedAudio);
-
-    const costUsd =
-      (nonCachedText * pricing.inputPer1M +
-        nonCachedAudio * effectiveAudioRate +
-        (cachedText + cachedAudio) * effectiveCachedRate +
-        usage.outputTokens * pricing.outputPer1M) /
-      1_000_000;
-    return { costUsd, pricingMissing: false };
+    const minCachedAudio = Math.max(0, cached - usage.textInputTokens);
+    const cachedAudio = Math.max(
+      minCachedAudio,
+      Math.min(usage.cachedAudioInputTokens ?? minCachedAudio, usage.audioInputTokens, cached),
+    );
+    const cachedText = cached - cachedAudio;
+    const nonCachedText = usage.textInputTokens - cachedText;
+    const nonCachedAudio = usage.audioInputTokens - cachedAudio;
+    const cacheWriteRate = pricing.cacheWritePer1M ?? 0;
+    const written = cacheWriteRate > 0 ? Math.min(usage.cacheWriteTokens ?? 0, nonCachedText) : 0;
+    const written12h = Math.min(usage.cacheWrite12hTokens ?? 0, written);
+    // OpenAI charges twice the default cache-write rate for 12-hour writes.
+    const inputCost =
+      (nonCachedText - written) * pricing.inputPer1M +
+      nonCachedAudio * effectiveAudioRate +
+      cachedText * effectiveCachedRate +
+      cachedAudio * effectiveCachedAudioRate +
+      (written + written12h) * cacheWriteRate;
+    const outputCost = usage.outputTokens * pricing.outputPer1M;
+    const longContext = totalInputTokens > (pricing.longContextThreshold ?? Infinity);
+    const cost = longContext ? 2 * inputCost + 1.5 * outputCost : inputCost + outputCost;
+    return { costUsd: cost / 1_000_000, pricingMissing: false };
   }
 
   if (pricing.perMinute > 0 && usage.audioSeconds > 0) {

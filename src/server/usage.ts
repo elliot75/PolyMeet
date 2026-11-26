@@ -112,18 +112,22 @@ export function upsertModelPricing(
 ): ModelPricing & { settledCount: number } {
   const model = entry.model.trim().replace(/^models\//, '');
   if (!model || model.length > 200) throw new Error('invalid_model');
-  const rates = [
-    entry.inputPer1M,
-    entry.audioInputPer1M,
-    entry.cachedInputPer1M,
-    entry.outputPer1M,
-    entry.perMinute,
-  ];
+  const { provider, inputPer1M, audioInputPer1M, cachedInputPer1M, outputPer1M, perMinute } = entry;
+  const rates = [inputPer1M, audioInputPer1M, cachedInputPer1M, outputPer1M, perMinute];
   if (rates.some((value) => typeof value !== 'number' || !Number.isFinite(value) || value < 0)) {
     throw new Error('invalid_pricing');
   }
   const updatedAt = Date.now();
-  const saved: ModelPricing = { ...entry, model, updatedAt };
+  const saved: ModelPricing = {
+    provider,
+    model,
+    inputPer1M,
+    audioInputPer1M,
+    cachedInputPer1M,
+    outputPer1M,
+    perMinute,
+    updatedAt,
+  };
   const db = getDb();
   let settledCount = 0;
   db.exec('BEGIN IMMEDIATE');
@@ -142,13 +146,13 @@ export function upsertModelPricing(
          updated_at = excluded.updated_at,
          is_builtin = 0`,
     ).run(
-      entry.provider,
+      provider,
       model,
-      entry.inputPer1M,
-      entry.audioInputPer1M,
-      entry.cachedInputPer1M,
-      entry.outputPer1M,
-      entry.perMinute,
+      inputPer1M,
+      audioInputPer1M,
+      cachedInputPer1M,
+      outputPer1M,
+      perMinute,
       updatedAt,
     );
 
@@ -160,13 +164,13 @@ export function upsertModelPricing(
          WHERE provider = ? AND pricing_missing = 1 AND pending_reconciliation = 0
            AND NOT EXISTS (SELECT 1 FROM usage_resolutions WHERE event_id = usage_events.id)`,
       )
-      .all(entry.provider) as unknown as UsageEventRow[];
+      .all(provider) as unknown as UsageEventRow[];
 
     const settleStmt = db.prepare(
       'UPDATE usage_events SET cost_usd = ?, pricing_missing = 0 WHERE id = ?',
     );
     for (const row of unpricedRows) {
-      const matched = findModelPricing([saved], entry.provider, row.model);
+      const matched = findModelPricing([saved], provider, row.model);
       if (!matched) continue;
       const calculated = calculateUsageCost(matched, {
         textInputTokens: row.text_input_tokens,
@@ -247,6 +251,9 @@ export interface RecordUsageInput {
   textInputTokens?: number;
   audioInputTokens?: number;
   cachedInputTokens?: number;
+  cachedAudioInputTokens?: number;
+  cacheWriteTokens?: number;
+  cacheWrite12hTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
   estimated?: boolean;
@@ -306,6 +313,12 @@ export function recordUsageEvent(input: RecordUsageInput): UsageMetric {
     textInputTokens,
     audioInputTokens,
     cachedInputTokens,
+    cachedAudioInputTokens:
+      input.cachedAudioInputTokens === undefined
+        ? undefined
+        : nonNegativeInt(input.cachedAudioInputTokens),
+    cacheWriteTokens: nonNegativeInt(input.cacheWriteTokens),
+    cacheWrite12hTokens: nonNegativeInt(input.cacheWrite12hTokens),
     outputTokens,
     audioSeconds,
     operation: input.operation,

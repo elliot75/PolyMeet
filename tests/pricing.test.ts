@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  builtinPricingAt,
   calculateUsageCost,
   DEFAULT_MODEL_PRICING,
   findModelPricing,
@@ -44,15 +45,72 @@ describe('pricing engine and formatting', () => {
       'gemini-3.5-transcribe-live',
     )!;
     const liveCost = calculateUsageCost(geminiLive, {
-      textInputTokens: 100_000,
+      textInputTokens: 0,
       audioInputTokens: 200_000,
       cachedInputTokens: 0,
       outputTokens: 10_000,
       audioSeconds: 60,
       operation: 'live_stt',
     });
-    // 0.1M * 0.5 + 0.2M * 3.5 + 0.01M * 21 = 0.05 + 0.70 + 0.21 = 0.96
-    expect(liveCost.costUsd).toBeCloseTo(0.96, 6);
+    expect(liveCost.costUsd).toBeCloseTo(0.91, 6);
+  });
+
+  it('applies published long-context rates only above the prompt threshold', () => {
+    const luna = findModelPricing(DEFAULT_MODEL_PRICING, 'openai', 'gpt-6-luna')!;
+    const usage = {
+      textInputTokens: 272_000,
+      audioInputTokens: 0,
+      cachedInputTokens: 100_000,
+      cacheWriteTokens: 100_000,
+      cacheWrite12hTokens: 60_000,
+      outputTokens: 100_000,
+      audioSeconds: 0,
+      operation: 'minutes',
+    } as const;
+    expect(calculateUsageCost(luna, usage).costUsd).toBeCloseTo(0.0782, 8);
+    expect(calculateUsageCost(luna, { ...usage, textInputTokens: 272_001 }).costUsd).toBeCloseTo(
+      0.1314002,
+      8,
+    );
+
+    const pro = findModelPricing(DEFAULT_MODEL_PRICING, 'gemini', 'gemini-2.5-pro')!;
+    const proUsage = { ...usage, textInputTokens: 200_000 };
+    expect(calculateUsageCost(pro, proUsage).costUsd).toBeCloseTo(1.1375, 8);
+    expect(calculateUsageCost(pro, { ...proUsage, textInputTokens: 200_001 }).costUsd).toBeCloseTo(
+      1.7750025,
+      8,
+    );
+  });
+
+  it('switches redirected Gemini models to the target rates on the published dates', () => {
+    const flash = findModelPricing(DEFAULT_MODEL_PRICING, 'gemini', 'gemini-2.5-flash')!;
+    const pro = findModelPricing(DEFAULT_MODEL_PRICING, 'gemini', 'gemini-2.5-pro')!;
+    const redirect = Date.UTC(2026, 11, 1);
+
+    expect(builtinPricingAt(flash, redirect - 1)).toMatchObject({
+      audioInputPer1M: 1,
+      cachedInputPer1M: 0.03,
+      cachedAudioInputPer1M: 0.1,
+    });
+    expect(builtinPricingAt(flash, redirect)).toMatchObject({
+      model: flash.model,
+      audioInputPer1M: 0.3,
+      cachedInputPer1M: 0.03,
+    });
+    expect(builtinPricingAt(flash, redirect).cachedAudioInputPer1M).toBeUndefined();
+    expect(builtinPricingAt(pro, redirect - 1).longContextThreshold).toBe(200_000);
+    expect(builtinPricingAt(pro, redirect)).toMatchObject({
+      model: pro.model,
+      inputPer1M: 0.75,
+      cachedInputPer1M: 0.075,
+      outputPer1M: 3.75,
+    });
+    expect(builtinPricingAt(pro, redirect).longContextThreshold).toBeUndefined();
+    expect(builtinPricingAt(pro, Date.UTC(2027, 0, 1))).toMatchObject({
+      inputPer1M: 1.5,
+      cachedInputPer1M: 0.15,
+      outputPer1M: 7.5,
+    });
   });
 
   it('falls back to per-minute audio billing and flags missing pricing', () => {

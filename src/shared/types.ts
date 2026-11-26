@@ -56,6 +56,9 @@ export interface ModelPricing {
   inputPer1M: number;
   audioInputPer1M: number;
   cachedInputPer1M: number;
+  cachedAudioInputPer1M?: number;
+  cacheWritePer1M?: number;
+  longContextThreshold?: number;
   outputPer1M: number;
   perMinute: number;
   updatedAt?: number;

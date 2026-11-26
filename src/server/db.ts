@@ -157,6 +157,8 @@ function initializeSchema(db: DatabaseSync, dbPath: string) {
       correctLegacyGeminiPricing(db);
     }
     db.exec(`
+      DELETE FROM model_pricing
+        WHERE provider = 'gemini' AND model = 'gemini-2.0-flash' AND is_builtin = 1;
       CREATE INDEX IF NOT EXISTS idx_usage_events_unsettled
         ON usage_events(started_at DESC, id DESC)
         WHERE pending_reconciliation = 1 OR pricing_missing = 1;

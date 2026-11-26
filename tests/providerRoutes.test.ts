@@ -185,6 +185,32 @@ describe('provider routes with simulated services', () => {
     expect(mocked.remove).toHaveBeenCalledWith({ name: 'files/test' });
   });
 
+  it('uses the Gemini audio cache rate when the provider reports the cached modality', async () => {
+    mocked.generate.mockResolvedValueOnce({
+      text: '{"segments":[]}',
+      usageMetadata: {
+        promptTokenCount: 1500,
+        promptTokensDetails: [
+          { modality: 'AUDIO', tokenCount: 1200 },
+          { modality: 'TEXT', tokenCount: 300 },
+        ],
+        cachedContentTokenCount: 200,
+        cacheTokensDetails: [{ modality: 'AUDIO', tokenCount: 200 }],
+        candidatesTokenCount: 250,
+      },
+    });
+    const body = form();
+    body.set('model', 'gemini-2.5-flash-lite');
+    const response = await app.request('/api/transcribe-file', {
+      method: 'POST',
+      headers: { 'x-gemini-api-key': 'test-key', Cookie: cookie },
+      body,
+    });
+    expect(response.status).toBe(200);
+    const { usage } = await response.json();
+    expect(usage.costUsd).toBeCloseTo(0.000436, 10);
+  });
+
   it('deletes the cloud file even if generation fails, without exposing provider details', async () => {
     mocked.generate.mockRejectedValue(new Error('sensitive provider message'));
     const response = await app.request('/api/transcribe-file', {
@@ -406,7 +432,16 @@ describe('provider routes with simulated services', () => {
       mocked.openaiResponse.mockResolvedValueOnce(
         (async function* () {
           yield { type: 'response.output_text.delta', delta: 'Meeting minutes' };
-          yield { type: 'response.completed' };
+          yield {
+            type: 'response.completed',
+            response: {
+              usage: {
+                input_tokens: 2400,
+                output_tokens: 120,
+                input_tokens_details: { cached_tokens: 600, cache_write_tokens: 1200 },
+              },
+            },
+          };
         })(),
       );
       const response = await app.request('/api/translate/stream', {
@@ -425,6 +460,8 @@ describe('provider routes with simulated services', () => {
         }),
       });
       expect(await response.text()).toContain('event: done');
+      expect(queryUsageReport({}).totals).toMatchObject({ pendingCalls: 0 });
+      expect(queryUsageReport({}).totals.costUsd).toBeCloseTo(0.000276, 10);
       const request = mocked.openaiResponse.mock.calls[0][0];
       if (reasoningEffort) expect(request.reasoning).toEqual({ effort: reasoningEffort });
       else expect(request).not.toHaveProperty('reasoning');

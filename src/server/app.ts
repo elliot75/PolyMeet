@@ -529,6 +529,8 @@ app.post(
               endedAt: Date.now(),
               textInputTokens: textUsage?.inputTokens,
               cachedInputTokens: textUsage?.cachedInputTokens,
+              cacheWriteTokens: textUsage?.cacheWriteTokens,
+              cacheWrite12hTokens: textUsage?.cacheWrite12hTokens,
               outputTokens: textUsage?.outputTokens,
               totalTokens: textUsage?.totalTokens,
               pendingReconciliation: !textUsage,
@@ -736,6 +738,7 @@ app.post(
             thoughtsTokenCount?: number;
             totalTokenCount?: number;
             promptTokensDetails?: Array<{ modality?: string; tokenCount?: number }>;
+            cacheTokensDetails?: Array<{ modality?: string; tokenCount?: number }>;
           }
         | undefined;
       let failed = false;
@@ -802,6 +805,9 @@ app.post(
         detailsAudio > 0 ? Math.min(detailsAudio, promptTokens || detailsAudio) : promptTokens;
       const textInputTokens = Math.max(0, promptTokens - audioInputTokens);
       const cachedInputTokens = Number(geminiUsage?.cachedContentTokenCount) || 0;
+      const cachedAudioInputTokens = geminiUsage?.cacheTokensDetails
+        ?.filter((d) => String(d.modality || '').toUpperCase() === 'AUDIO')
+        .reduce((sum, d) => sum + (Number(d.tokenCount) || 0), 0);
       const outputTokens =
         (Number(geminiUsage?.candidatesTokenCount) || 0) +
         (Number(geminiUsage?.thoughtsTokenCount) || 0);
@@ -818,6 +824,7 @@ app.post(
         textInputTokens,
         audioInputTokens,
         cachedInputTokens,
+        cachedAudioInputTokens,
         outputTokens,
         totalTokens,
         pendingReconciliation: !geminiUsage,

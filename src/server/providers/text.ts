@@ -6,6 +6,8 @@ import type { LunaReasoningEffort } from '../../shared/models';
 export interface ProviderTextUsage {
   inputTokens: number;
   cachedInputTokens: number;
+  cacheWriteTokens?: number;
+  cacheWrite12hTokens?: number;
   outputTokens: number;
   totalTokens: number;
 }
@@ -56,7 +58,11 @@ export async function* generateText(
                 input_tokens?: number;
                 output_tokens?: number;
                 total_tokens?: number;
-                input_tokens_details?: { cached_tokens?: number };
+                input_tokens_details?: {
+                  cached_tokens?: number;
+                  cache_write_tokens?: number;
+                  cache_write_tokens_details?: { ttl_12h_tokens?: number };
+                };
               };
             };
           }
@@ -67,6 +73,9 @@ export async function* generateText(
           onUsage?.({
             inputTokens,
             cachedInputTokens: Number(usage.input_tokens_details?.cached_tokens) || 0,
+            cacheWriteTokens: Number(usage.input_tokens_details?.cache_write_tokens) || 0,
+            cacheWrite12hTokens:
+              Number(usage.input_tokens_details?.cache_write_tokens_details?.ttl_12h_tokens) || 0,
             outputTokens,
             totalTokens: Number(usage.total_tokens) || inputTokens + outputTokens,
           });
