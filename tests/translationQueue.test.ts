@@ -35,12 +35,11 @@ afterEach(() => {
 
 describe('translation queue', () => {
   it('retains at most 4 prior sentences in sliding context and emits updates', async () => {
-    const payloads: string[] = [];
+    const payloads: Array<{ text: string; model: string; reasoningEffort?: string }> = [];
     vi.stubGlobal(
       'fetch',
       vi.fn(async (_url: string, init?: RequestInit) => {
-        const body = JSON.parse(String(init?.body || '{}'));
-        payloads.push(body.text);
+        payloads.push(JSON.parse(String(init?.body || '{}')));
         return sseResponse(['event: delta\ndata: {"text":"ok"}\n\n', 'event: done\ndata: {}\n\n']);
       }),
     );
@@ -64,7 +63,11 @@ describe('translation queue', () => {
     await vi.waitFor(() => expect(updates.filter((entry) => entry.final)).toHaveLength(6));
 
     expect(onError).not.toHaveBeenCalled();
-    expect(payloads[5]).toBe('Context:\nline-2\nline-3\nline-4\nline-5\n\nCurrent speech:\nline-6');
+    expect(payloads[5]).toMatchObject({
+      model: 'gpt-6-luna',
+      reasoningEffort: 'none',
+      text: 'Context:\nline-2\nline-3\nline-4\nline-5\n\nCurrent speech:\nline-6',
+    });
     expect(updates.filter((entry) => entry.id === 's1')).toEqual([
       { id: 's1', text: 'ok', final: false },
       { id: 's1', text: 'ok', final: true },

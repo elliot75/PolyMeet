@@ -32,7 +32,7 @@ export const defaults: Settings = {
   geminiLiveModel: defaultModels.gemini.live,
   translationProvider: 'openai',
   openaiTranslationModel: defaultModels.openai.translation,
-  openaiTranslationReasoningEffort: '',
+  openaiTranslationReasoningEffort: 'none',
   geminiTranslationModel: defaultModels.gemini.translation,
   rememberKeys: false,
 };

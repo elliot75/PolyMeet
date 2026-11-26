@@ -1,7 +1,10 @@
+const PACKETS_PER_SECOND = 10;
+
 class PcmProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
     this.targetRate = options.processorOptions.targetRate;
+    this.maxSpeechPackets = (options.processorOptions.maxSpeechSeconds ?? 18) * PACKETS_PER_SECOND;
     this.ratio = sampleRate / this.targetRate;
     this.position = 0;
     this.samples = [];
@@ -41,7 +44,7 @@ class PcmProcessor extends AudioWorkletProcessor {
       this.silentPackets = 0;
     } else if (this.speech) this.silentPackets++;
     if (this.speech) this.speechPackets++;
-    if (this.speech && (this.silentPackets >= 7 || this.speechPackets >= 180)) {
+    if (this.speech && (this.silentPackets >= 7 || this.speechPackets >= this.maxSpeechPackets)) {
       this.port.postMessage({ type: 'commit' });
       this.speech = false;
       this.silentPackets = 0;
@@ -63,7 +66,7 @@ class PcmProcessor extends AudioWorkletProcessor {
         this.samples[i] * (1 - fraction) + this.samples[Math.ceil(this.position)] * fraction,
       );
       this.position += this.ratio;
-      if (this.packet.length >= this.targetRate / 10) this.emit();
+      if (this.packet.length >= this.targetRate / PACKETS_PER_SECOND) this.emit();
     }
     const consumed = Math.min(this.samples.length, Math.floor(this.position));
     if (consumed) {

@@ -15,6 +15,10 @@ export class LiveCapture {
   ) {
     this.onEvent = onEvent;
     const targetRate = options.provider === 'openai' ? 24000 : 16000;
+    const maxSpeechSeconds =
+      options.provider === 'openai' && options.model.trim() === 'gpt-live-transcribe'
+        ? 10
+        : undefined;
     const context = new AudioContext();
     this.context = context;
     if (context.state === 'suspended') await context.resume();
@@ -26,7 +30,7 @@ export class LiveCapture {
       );
       const source = context.createMediaStreamSource(track.stream);
       const node = new AudioWorkletNode(context, 'pcm-processor', {
-        processorOptions: { targetRate },
+        processorOptions: { targetRate, maxSpeechSeconds },
       });
       const silence = context.createGain();
       silence.gain.value = 0;

@@ -31,7 +31,7 @@ flowchart LR
 
     subgraph Providers["Upstream AI Providers"]
         OAI_RT["OpenAI Realtime WS (gpt-live-transcribe / gpt-4o-transcribe)"]
-        OAI_API["OpenAI REST (gpt-transcribe / gpt-5-mini)"]
+        OAI_API["OpenAI REST (gpt-transcribe / gpt-6-luna)"]
         GEM_RT["Google BidiGenerateContent WS (gemini-3.5-transcribe-live)"]
         GEM_API["Google GenAI SDK (gemini-3.8-flash / gemini-3.5-flash-lite)"]
     end
@@ -60,7 +60,7 @@ flowchart LR
 
 ### 3.2 雙 Provider 2026 即時 STT 地雷排除
 - **Google `gemini-3.5-transcribe-live` 不送 `serverContent.turnComplete`**：該模型只會推送 `serverContent.interimInputTranscription`（暫定文字）與 `serverContent.inputTranscription`（定稿文字）。Proxy 絕對不等待 `turnComplete`，收到 `inputTranscription` 即視為定稿並轉發前端。
-- **OpenAI `gpt-live-transcribe` 不支援 `server_vad`**：若傳入 `turn_detection: { type: "server_vad" }` 會拋出 `invalid_request_error`。因此使用該模型時強制設為 `turn_detection: null`，由前端 `AudioWorklet` 的輕量能量 VAD 在語音停頓（~700ms）或超過單句上限（18s）時送出 `audio.commit`，Proxy 再轉為 `input_audio_buffer.commit`；若使用者選用 `gpt-4o-transcribe`，則自動改開 `server_vad`。
+- **OpenAI `gpt-live-transcribe` 使用手動提交**：Proxy 設定 `turn_detection: null`。前端 `AudioWorklet` 在語音停頓約 700 ms 或連續發言達 10 秒時送出 `audio.commit`，由 Proxy 轉為 `input_audio_buffer.commit`。其他模型的 AudioWorklet 上限為 18 秒。`gpt-4o-transcribe` 使用 `server_vad` 定稿。
 - **長會議連線逾時處理**：Gemini Live 存在單次連線時限（約 10–15 分鐘，會推送 `goAway`），OpenAI 約 30–60 分鐘。前端 `LiveSttClient` 在就緒逾時、上游到期或斷線時自動重連，並重播尚未定稿的有界 PCM 佇列。重連可帶入最多 500 ms 前置靜音，不會為了補前置音訊而重送已定稿的語音；超出佇列容量時可用本機錄音補轉。
 
 ### 3.3 音訊採集與檔案補轉
@@ -76,8 +76,8 @@ flowchart LR
 | :--- | :--- | :--- | :--- |
 | **即時串流 STT** | `gpt-live-transcribe` | `gemini-3.5-transcribe-live` | 備選：`gpt-4o-transcribe`、`gpt-4o-mini-transcribe` |
 | **離線音檔 STT** | `gpt-transcribe` | `gemini-3.8-flash` | 備選：`whisper-1`，Google 輸出 JSON Schema 結構化時間軸 |
-| **即時雙語翻譯** | `gpt-5-mini` | `gemini-3.5-flash-lite` | 滑動上下文雙向判斷，超低延遲串流輸出 |
-| **會議記錄生成** | `gpt-5-mini` | `gemini-3.8-flash` | 支援「僅潤飾」與「翻譯並潤飾」，備選 `gpt-5` |
+| **即時雙語翻譯** | `gpt-6-luna` | `gemini-3.5-flash-lite` | OpenAI 思考強度預設為「不推理」，可調整 |
+| **會議記錄生成** | `gpt-6-luna` | `gemini-3.8-flash` | 支援「僅潤飾」與「翻譯並潤飾」，備選 `gpt-5` |
 
 ---
 

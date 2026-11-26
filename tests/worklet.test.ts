@@ -28,6 +28,9 @@ describe('audio worklet', () => {
     const leftChannel = new Float32Array(128);
     for (let offset = 0; offset < samples.length; offset += 128)
       processor.process([[leftChannel, samples.subarray(offset, offset + 128)]]);
+    const commit = events.findIndex((event) => event.type === 'commit');
+    expect(commit).toBeGreaterThan(0);
+    expect(events.slice(0, commit).filter((event) => event.type === 'audio')).toHaveLength(17);
     processor.port.onmessage({ data: { type: 'flush', id: 'test-flush' } });
     const packets = events.filter((event) => event.type === 'audio');
     expect(packets.reduce((bytes, event) => bytes + (event.buffer?.byteLength ?? 0), 0)).toBe(
@@ -41,36 +44,48 @@ describe('audio worklet', () => {
       events.findIndex((event) => event.type === 'commit'),
     );
   });
-  it('commits long continuous speech and flushes the last partial packet', () => {
-    const events: Array<{ type: string; id?: string; buffer?: ArrayBuffer }> = [];
-    let Processor: any;
-    class Base {
-      port = {
-        onmessage: null,
-        postMessage: (event: { type: string; id?: string; buffer?: ArrayBuffer }) =>
-          events.push(event),
-      };
-    }
-    const code = readFileSync(new URL('../public/audio-worklet.js', import.meta.url), 'utf8');
-    runInNewContext(code, {
-      AudioWorkletProcessor: Base,
-      sampleRate: 48000,
-      registerProcessor: (_name: string, value: unknown) => {
-        Processor = value;
-      },
-      Int16Array,
-      Math,
-    });
-    const processor = new Processor({ processorOptions: { targetRate: 24000 } });
-    const samples = new Float32Array(48000 * 19).fill(0.25);
-    for (let offset = 0; offset < samples.length; offset += 128)
-      processor.process([[samples.subarray(offset, offset + 128)]]);
-    expect(events.filter((event) => event.type === 'commit')).toHaveLength(1);
-    expect(events.filter((event) => event.type === 'speech.start')).toHaveLength(2);
-    const first = events.find((event) => event.type === 'audio')!;
-    expect(new Int16Array(first.buffer!)[0]).toBe(8191);
-    processor.port.onmessage({ data: { type: 'flush', id: 'test-flush' } });
-    expect(events.filter((event) => event.type === 'commit')).toHaveLength(2);
-    expect(events.at(-1)).toEqual({ type: 'flushed', id: 'test-flush' });
-  });
+  it.each([
+    { maxSpeechSeconds: undefined, expectedPackets: 180 },
+    { maxSpeechSeconds: 10, expectedPackets: 100 },
+  ])(
+    'commits continuous speech at packet $expectedPackets and flushes the remainder',
+    ({ maxSpeechSeconds, expectedPackets }) => {
+      const events: Array<{ type: string; id?: string; buffer?: ArrayBuffer }> = [];
+      let Processor: any;
+      class Base {
+        port = {
+          onmessage: null,
+          postMessage: (event: { type: string; id?: string; buffer?: ArrayBuffer }) =>
+            events.push(event),
+        };
+      }
+      const code = readFileSync(new URL('../public/audio-worklet.js', import.meta.url), 'utf8');
+      runInNewContext(code, {
+        AudioWorkletProcessor: Base,
+        sampleRate: 48000,
+        registerProcessor: (_name: string, value: unknown) => {
+          Processor = value;
+        },
+        Int16Array,
+        Math,
+      });
+      const processor = new Processor({
+        processorOptions: { targetRate: 24000, maxSpeechSeconds },
+      });
+      const samples = new Float32Array(48000 * 19).fill(0.25);
+      for (let offset = 0; offset < samples.length; offset += 128)
+        processor.process([[samples.subarray(offset, offset + 128)]]);
+      expect(events.filter((event) => event.type === 'commit')).toHaveLength(1);
+      const commit = events.findIndex((event) => event.type === 'commit');
+      expect(events.slice(0, commit).filter((event) => event.type === 'audio')).toHaveLength(
+        expectedPackets,
+      );
+      expect(events.filter((event) => event.type === 'speech.start')).toHaveLength(2);
+      const first = events.find((event) => event.type === 'audio')!;
+      expect(new Int16Array(first.buffer!)[0]).toBe(8191);
+      processor.port.onmessage({ data: { type: 'flush', id: 'test-flush' } });
+      expect(events.filter((event) => event.type === 'commit')).toHaveLength(2);
+      expect(events.at(-1)).toEqual({ type: 'flushed', id: 'test-flush' });
+    },
+  );
 });

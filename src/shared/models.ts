@@ -21,8 +21,8 @@ export const defaultModels = {
   openai: {
     live: 'gpt-live-transcribe',
     file: 'gpt-transcribe',
-    translation: 'gpt-5-mini',
-    minutes: 'gpt-5-mini',
+    translation: gpt6LunaModel,
+    minutes: gpt6LunaModel,
   },
   gemini: {
     live: 'gemini-3.5-transcribe-live',
